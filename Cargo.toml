@@ -1,0 +1,63 @@
+# Copyright: lituus-io, all rights reserved.
+# Author: terekete <spicyzhug@gmail.com>
+
+[package]
+name = "objstore-r"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.89" # std File::lock (the pinned nightly is newer)
+license = "AGPL-3.0-or-later"
+description = "Object stores with generation preconditions for immutable-snapshot data: local directory, in-memory (fault injection), Google Cloud Storage"
+repository = "https://github.com/lituus-io/objstore-r"
+authors = ["lituus-io <spicyzhug@gmail.com>"]
+publish = false
+keywords = ["object-store", "gcs", "storage", "cas", "embedded"]
+categories = ["filesystem", "database-implementations", "asynchronous"]
+
+[features]
+# Install-by-requirement: the default build is the trait, the local-directory
+# store and the in-memory store, with no network dependency.
+default = []
+# Google Cloud Storage over the JSON API (reqwest + rustls), with ADC token
+# providers (metadata server, gcloud user credentials, static tokens).
+gcs = ["dep:reqwest", "dep:serde", "dep:serde_json", "dep:tokio"]
+# The reusable conformance suite, for crates implementing `ObjectStore`.
+testing = []
+
+[dependencies]
+bytes = "1.7"
+thiserror = "1.0"
+reqwest = { version = "0.12", optional = true, default-features = false, features = ["rustls-tls", "http2"] }
+serde = { version = "1.0", optional = true, features = ["derive"] }
+serde_json = { version = "1.0", optional = true }
+# Backoff sleeps only (reqwest already requires a tokio reactor).
+tokio = { version = "1.40", optional = true, default-features = false, features = ["time"] }
+
+[dev-dependencies]
+proptest = "1.5"
+criterion = { version = "0.5", features = ["html_reports", "async_tokio"] }
+tempfile = "3.12"
+futures = { version = "0.3", default-features = false, features = ["executor", "std"] }
+tokio = { version = "1.40", features = ["rt", "macros", "time", "net", "io-util"] }
+
+[[bench]]
+name = "objstore_bench"
+harness = false
+
+[[test]]
+name = "conformance"
+required-features = ["testing"]
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 1
+strip = true
+
+[profile.bench]
+inherits = "release"
+lto = "fat"
+debug = true
+
+[workspace]
+members = []

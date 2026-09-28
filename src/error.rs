@@ -1,0 +1,80 @@
+// Copyright: lituus-io, all rights reserved.
+// Author: terekete <spicyzhug@gmail.com>
+//
+//! Errors.
+
+/// Result alias.
+pub type Result<T, E = Error> = std::result::Result<T, E>;
+
+/// Everything an object store can report.
+#[derive(Debug, thiserror::Error)]
+#[non_exhaustive]
+pub enum Error {
+    /// The object does not exist (ranged reads only; `get`/`head` return `None`).
+    #[error("object not found")]
+    NotFound,
+    /// A [`Cond::CreateOnly`](crate::Cond::CreateOnly) write found an existing object.
+    #[error("object already exists")]
+    Conflict,
+    /// A [`Cond::IfGeneration`](crate::Cond::IfGeneration) write found another
+    /// generation (or no object).
+    #[error("generation precondition failed")]
+    PreconditionFailed,
+    /// The key or prefix is not valid (see [`Key::parse`](crate::Key::parse)).
+    #[error("invalid key: {reason}")]
+    InvalidKey {
+        /// Why.
+        reason: &'static str,
+    },
+    /// The store could not be reached or refused for a transient reason.
+    #[error("store unavailable: {message}")]
+    Unavailable {
+        /// What happened (never contains credentials).
+        message: String,
+        /// Worth retrying.
+        retriable: bool,
+    },
+    /// Authentication or authorization failed.
+    #[error("not authorized: {message}")]
+    Auth {
+        /// What happened (never contains credentials).
+        message: String,
+    },
+    /// The body exceeds a configured limit.
+    #[error("object larger than the {limit}-byte limit")]
+    TooLarge {
+        /// The limit.
+        limit: u64,
+    },
+    /// The store answered with something unexpected.
+    #[error("protocol error: {message}")]
+    Protocol {
+        /// What was wrong.
+        message: String,
+    },
+    /// Local I/O.
+    #[error("i/o: {source}")]
+    Io {
+        /// The underlying error.
+        #[from]
+        source: std::io::Error,
+    },
+}
+
+impl Error {
+    /// Worth retrying (transient unavailability; never conflicts or preconditions).
+    #[must_use]
+    pub fn is_retriable(&self) -> bool {
+        matches!(self, Error::Unavailable { retriable: true, .. })
+    }
+
+    #[cfg_attr(not(any(feature = "gcs", test)), allow(dead_code))]
+    pub(crate) fn unavailable(message: impl Into<String>, retriable: bool) -> Self {
+        Error::Unavailable { message: message.into(), retriable }
+    }
+
+    #[cfg_attr(not(feature = "gcs"), allow(dead_code))]
+    pub(crate) fn protocol(message: impl Into<String>) -> Self {
+        Error::Protocol { message: message.into() }
+    }
+}

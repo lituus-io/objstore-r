@@ -1,0 +1,51 @@
+# Copyright: lituus-io, all rights reserved.
+# Author: terekete <spicyzhug@gmail.com>
+name: Fuzz
+
+on:
+  schedule:
+    - cron: '0 3 * * 3' # Weekly, Wednesday 03:00 UTC
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      duration:
+        description: 'Fuzz duration per target (seconds)'
+        default: '300'
+        type: string
+
+permissions:
+  contents: read
+
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+  CARGO_TERM_COLOR: always
+  # Short smoke on pull requests; long runs on the schedule or on demand.
+  FUZZ_DURATION: ${{ inputs.duration || (github.event_name == 'pull_request' && '30') || '600' }}
+
+jobs:
+  fuzz:
+    name: Fuzz (${{ matrix.target }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # Every decoder of bytes this crate did not write.
+        target: [fuzz_key, fuzz_gcs_wire]
+    steps:
+      - uses: actions/checkout@v4
+      - run: rustup show
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: fuzz-${{ matrix.target }}
+          workspaces: fuzz
+      - name: Install cargo-fuzz
+        run: RUSTUP_TOOLCHAIN=stable cargo install cargo-fuzz --locked
+      - name: Run fuzzer
+        run: cargo fuzz run ${{ matrix.target }} -- -max_total_time=${{ env.FUZZ_DURATION }}
+      - name: Upload crash artifacts
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: fuzz-crashes-${{ matrix.target }}
+          path: fuzz/artifacts/${{ matrix.target }}/

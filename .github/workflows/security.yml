@@ -1,0 +1,72 @@
+# Copyright: lituus-io, all rights reserved.
+# Author: terekete <spicyzhug@gmail.com>
+name: Security
+
+on:
+  schedule:
+    - cron: '0 9 * * 1' # Weekly, Monday 09:00 UTC
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+  CARGO_TERM_COLOR: always
+
+jobs:
+  audit:
+    name: Advisory audit
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install cargo-audit
+        run: RUSTUP_TOOLCHAIN=stable cargo install cargo-audit --locked
+      - run: cargo audit
+
+  deny:
+    name: Cargo deny
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install cargo-deny
+        run: RUSTUP_TOOLCHAIN=stable cargo install cargo-deny --locked
+      - run: cargo deny --all-features check
+
+  suite:
+    name: Security suite
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: rustup show
+      - uses: Swatinem/rust-cache@v2
+      # tests/security.rs: hostile keys, symlink escapes, nesting collisions,
+      # and a scripted HTTP server that redirects, over-sends, fails
+      # transiently, loses responses and refuses auth (no token in any error).
+      - name: Security tests
+        run: cargo test --all-features --test security
+      - name: Model-based property tests
+        run: cargo test --all-features --test proptest_model
+        env:
+          PROPTEST_CASES: "1024"
+      - name: No unsafe, no dyn
+        run: |
+          grep -q '#!\[forbid(unsafe_code)\]' src/lib.rs
+          ! grep -rn --include='*.rs' -E '\bdyn\b' src/ | grep -vE '^[^:]+:[0-9]+:\s*//'
+
+  panic-lints:
+    name: Panic-path lints
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: rustup show
+      - uses: Swatinem/rust-cache@v2
+      - name: Report panic-capable paths (library code)
+        continue-on-error: true
+        run: |
+          cargo clippy --all-features --lib -- -W clippy::unwrap_used -W clippy::expect_used -W clippy::panic -W clippy::indexing_slicing 2>&1 | tee lints.txt
+          echo "### Panic-capable paths (advisory): $(grep -c 'clippy::' lints.txt || true)" >> "$GITHUB_STEP_SUMMARY"

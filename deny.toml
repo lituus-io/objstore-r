@@ -1,0 +1,62 @@
+# Copyright: lituus-io, all rights reserved.
+# Author: terekete <spicyzhug@gmail.com>
+#
+# cargo-deny configuration. Run by .github/workflows/security.yml.
+
+[graph]
+# Check every feature combination's dependency set, not just the default one.
+all-features = true
+
+[advisories]
+version = 2
+yanked = "deny"
+# Advisories deliberately accepted must be listed here WITH a reason, never
+# silently suppressed by loosening the gate above.
+ignore = []
+
+[licenses]
+version = 2
+confidence-threshold = 0.9
+allow = [
+    "MIT",
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "ISC",
+    "Unicode-3.0",
+    "Unicode-DFS-2016",
+    "Zlib",
+    "MPL-2.0",
+    "CC0-1.0",
+    # Added after the first CI run rejected real dependencies. All three are
+    # permissive and compatible with shipping a proprietary binary:
+    #   NCSA                 University of Illinois/NCSA -- BSD+MIT hybrid,
+    #                        reached via "(MIT OR Apache-2.0) AND NCSA".
+    #   CDLA-Permissive-2.0  Community Data License Agreement, permissive
+    #                        variant; carries no copyleft obligation.
+    #   BSL-1.0              Boost Software License; permissive, no attribution
+    #                        requirement in binary form.
+    "NCSA",
+    "CDLA-Permissive-2.0",
+    "BSL-1.0",
+]
+
+# This crate is proprietary and publish = false; cargo-deny must not flag the
+# workspace's own members for lacking an SPDX-allowed license.
+[licenses.private]
+ignore = true
+
+[bans]
+multiple-versions = "warn"
+wildcards = "deny"
+# A path dependency carries no version requirement, which cargo-deny counts as a
+# wildcard. That is the normal shape for crates developed together (graph-r's
+# optional link-r edge, and the fuzz crate's edge back to its parent), so path
+# deps are exempted while a genuine `version = "*"` from crates.io still fails.
+allow-wildcard-paths = true
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]

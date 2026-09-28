@@ -1,0 +1,40 @@
+# Copyright: lituus-io, all rights reserved.
+# Author: terekete <spicyzhug@gmail.com>
+name: Benchmark
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+  CARGO_INCREMENTAL: 0
+  CARGO_TERM_COLOR: always
+
+jobs:
+  benchmark:
+    name: Criterion
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: rustup show
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: bench
+      # Advisory on shared runners (noise routinely reaches double digits):
+      # the report is uploaded for review; the job fails only if a bench breaks.
+      - name: Run benchmarks
+        run: cargo bench --all-features -- --noplot
+      - name: Upload criterion report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: criterion-report
+          path: target/criterion/
+          retention-days: 14

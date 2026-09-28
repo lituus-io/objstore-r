@@ -1,0 +1,42 @@
+# Copyright: lituus-io, all rights reserved.
+# Author: terekete <spicyzhug@gmail.com>
+name: Release
+
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: read
+
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+  CARGO_TERM_COLOR: always
+
+jobs:
+  verify:
+    name: Verify tag
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - run: rustup show
+      - uses: Swatinem/rust-cache@v2
+      - name: Tag matches the manifest version
+        run: |
+          v=$(cargo metadata --no-deps --format-version 1 | python3 -c 'import json,sys; print(json.load(sys.stdin)["packages"][0]["version"])')
+          test "v$v" = "${GITHUB_REF_NAME}" || { echo "tag ${GITHUB_REF_NAME} != v$v"; exit 1; }
+      - run: cargo test --all-features
+      - run: cargo package --allow-dirty --no-verify --list
+      # API compatibility against the previous release tag (skipped for the
+      # first release, which has no baseline).
+      - name: Semver check
+        run: |
+          prev=$(git tag --sort=-v:refname | grep -v "^${GITHUB_REF_NAME}$" | head -1 || true)
+          if [ -n "$prev" ]; then
+            RUSTUP_TOOLCHAIN=stable cargo install cargo-semver-checks --locked
+            cargo semver-checks --baseline-rev "$prev" --all-features
+          else
+            echo "first release: no baseline"
+          fi

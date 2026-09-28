@@ -1,0 +1,149 @@
+# Copyright: lituus-io, all rights reserved.
+# Author: terekete <spicyzhug@gmail.com>
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+  CARGO_INCREMENTAL: 0
+  RUSTFLAGS: "-D warnings"
+  CARGO_TERM_COLOR: always
+
+# The toolchain comes from rust-toolchain.toml via `rustup show`, not from
+# dtolnay/rust-toolchain (which exports RUSTUP_TOOLCHAIN and would override the
+# dated pin), exactly as in graph-r and link-r.
+
+jobs:
+  fmt:
+    name: Format
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: rustup show
+      - run: cargo fmt --check
+
+  clippy:
+    name: Clippy
+    runs-on: ubuntu-latest
+    needs: fmt
+    steps:
+      - uses: actions/checkout@v4
+      - run: rustup show
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo clippy --all-features --all-targets
+      - run: cargo clippy --no-default-features --all-targets
+
+  test:
+    name: Test (${{ matrix.name }})
+    needs: fmt
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { name: linux-x86_64, runner: ubuntu-latest }
+          - { name: linux-arm64, runner: ubuntu-24.04-arm }
+          - { name: macos-arm64, runner: macos-15 }
+          # LocalDir's rename/lock/mtime semantics and device-name rules differ
+          # most on Windows.
+          - { name: windows-x86_64, runner: windows-latest }
+    steps:
+      - uses: actions/checkout@v4
+      - run: rustup show
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.name }}
+      - name: Test
+        shell: bash
+        run: cargo test --all-features
+
+  gcs-emulator:
+    name: GCS integration (fake-gcs-server)
+    needs: fmt
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: rustup show
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: fakegcs
+      # Started with docker run rather than a service container: the emulator
+      # needs command-line flags, which service containers cannot pass.
+      - name: Start fake-gcs-server
+        run: |
+          docker run -d --name fakegcs -p 4443:4443 fsouza/fake-gcs-server \
+            -scheme http -port 4443 -public-host 127.0.0.1:4443 -external-url http://127.0.0.1:4443
+          for i in $(seq 1 30); do curl -sf "http://127.0.0.1:4443/storage/v1/b?project=test" && break; sleep 1; done
+      - name: Conformance against the emulator (simple and resumable uploads)
+        env:
+          OBJSTORE_FAKE_GCS: http://127.0.0.1:4443
+        run: cargo test --all-features --test conformance -- --nocapture
+
+  features:
+    name: Feature matrix
+    needs: fmt
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: rustup show
+      - uses: Swatinem/rust-cache@v2
+      # `default = []` is the promise: LocalDir and Mem pull in no HTTP stack.
+      - name: Each feature combination
+        run: |
+          set -euo pipefail
+          for f in "" "gcs" "testing" "gcs,testing"; do
+            echo "::group::features=${f:-none}"
+            if [ -z "$f" ]; then
+              cargo check --no-default-features --all-targets
+            else
+              cargo check --no-default-features --features "$f" --all-targets
+            fi
+            echo "::endgroup::"
+          done
+      - name: No HTTP stack without gcs
+        run: |
+          ! cargo tree --no-default-features -e normal | grep -E "reqwest|hyper|rustls"
+
+  docs:
+    name: Docs
+    needs: fmt
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: rustup show
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo doc --all-features --no-deps
+        env:
+          RUSTDOCFLAGS: "-D warnings"
+
+  coverage:
+    name: Coverage
+    needs: fmt
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: rustup show
+      - run: rustup component add llvm-tools-preview
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: coverage
+      - name: Install cargo-llvm-cov
+        run: RUSTUP_TOOLCHAIN=stable cargo install cargo-llvm-cov --locked
+      - name: Start fake-gcs-server
+        run: |
+          docker run -d --name fakegcs -p 4443:4443 fsouza/fake-gcs-server \
+            -scheme http -port 4443 -public-host 127.0.0.1:4443 -external-url http://127.0.0.1:4443
+          for i in $(seq 1 30); do curl -sf "http://127.0.0.1:4443/storage/v1/b?project=test" && break; sleep 1; done
+      - name: Measure (floor 80% lines)
+        env:
+          OBJSTORE_FAKE_GCS: http://127.0.0.1:4443
+        run: |
+          cargo llvm-cov --all-features --summary-only --fail-under-lines 80 | tee coverage.txt
+          { echo "### Coverage"; echo; echo '```'; cat coverage.txt; echo '```'; } >> "$GITHUB_STEP_SUMMARY"

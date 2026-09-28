@@ -1,0 +1,33 @@
+# Copyright: lituus-io, all rights reserved.
+# Author: terekete <spicyzhug@gmail.com>
+
+[package]
+name = "objstore-r-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2021"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+objstore-r = { path = "..", features = ["gcs"] }
+
+[[bin]]
+name = "fuzz_key"
+path = "fuzz_targets/fuzz_key.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_gcs_wire"
+path = "fuzz_targets/fuzz_gcs_wire.rs"
+test = false
+doc = false
+bench = false
+
+# Detached from the parent workspace on purpose (mirrors graph-r and link-r).
+[workspace]
+members = ["."]
