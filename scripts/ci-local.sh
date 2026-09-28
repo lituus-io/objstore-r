@@ -49,7 +49,7 @@ step security
 if have deny; then cargo deny --all-features check; else warn "cargo-deny not installed"; fi
 if have audit; then cargo audit; else warn "cargo-audit not installed"; fi
 grep -q '#!\[forbid(unsafe_code)\]' src/lib.rs
-if grep -rnE --include='*.rs' '\bdyn\b' src/ | grep -vE '^[^:]+:[0-9]+:\s*//'; then echo "dyn in library code"; exit 1; fi
+if grep -rnE --include='*.rs' '\bdyn\b|\bArc<|Box<dyn' src/ tests/ benches/ | grep -vE '^[^:]+:[0-9]+:\s*//'; then echo "dyn in library code"; exit 1; fi
 
 step "fuzz (${FUZZ_SECS}s per target)"
 if have fuzz; then

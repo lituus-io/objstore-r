@@ -56,7 +56,7 @@ jobs:
       - name: No unsafe, no dyn
         run: |
           grep -q '#!\[forbid(unsafe_code)\]' src/lib.rs
-          ! grep -rn --include='*.rs' -E '\bdyn\b' src/ | grep -vE '^[^:]+:[0-9]+:\s*//'
+          ! grep -rn --include='*.rs' -E '\bdyn\b|\bArc<|Box<dyn' src/ tests/ benches/ | grep -vE '^[^:]+:[0-9]+:\s*//'
 
   panic-lints:
     name: Panic-path lints
