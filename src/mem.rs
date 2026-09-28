@@ -15,9 +15,13 @@ use std::future::{ready, Ready};
 use std::ops::Range;
 use std::sync::Mutex;
 
-/// A scripted failure for the next operation.
+/// A scripted outcome for one future operation.
 #[derive(Debug)]
+#[non_exhaustive]
 pub enum Fault {
+    /// Let the operation through untouched (a placeholder that lets a real
+    /// fault target the n-th operation; see [`Mem::inject_after`]).
+    Pass,
     /// Fail without applying the operation.
     Fail(Error),
     /// Apply the operation, then report this error.
@@ -43,6 +47,21 @@ impl Mem {
     /// Queue a fault for a future operation (consumed in order, one per call).
     pub fn inject(&self, fault: Fault) {
         self.lock().faults.push_back(fault);
+    }
+
+    /// Let `skip` operations through, then apply `fault` — for crash tests
+    /// that fail each step of a multi-operation protocol in turn.
+    pub fn inject_after(&self, skip: u64, fault: Fault) {
+        let mut g = self.lock();
+        for _ in 0..skip {
+            g.faults.push_back(Fault::Pass);
+        }
+        g.faults.push_back(fault);
+    }
+
+    /// Drop every queued fault.
+    pub fn clear_faults(&self) {
+        self.lock().faults.clear();
     }
 
     /// Operations served so far (every call, failed or not).
@@ -73,7 +92,7 @@ impl Mem {
                 let _ = op(&mut g);
                 Err(e)
             }
-            None => op(&mut g),
+            Some(Fault::Pass) | None => op(&mut g),
         }
     }
 }
@@ -159,6 +178,17 @@ impl ObjectStore for Mem {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn inject_after_targets_the_nth_operation() {
+        let m = Mem::default();
+        m.inject_after(2, Fault::Fail(Error::unavailable("boom", true)));
+        let put = |k| futures::executor::block_on(m.put(k, Bytes::new(), Cond::None));
+        assert!(put("a").is_ok());
+        assert!(put("b").is_ok());
+        assert!(put("c").is_err());
+        assert!(put("d").is_ok());
+    }
     use futures::executor::block_on;
 
     #[test]
