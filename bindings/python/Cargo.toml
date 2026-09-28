@@ -1,0 +1,36 @@
+# Copyright: lituus-io, all rights reserved.
+# Author: terekete <spicyzhug@gmail.com>
+
+[package]
+name = "objstore-r-python"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.89"
+license = "AGPL-3.0-or-later"
+description = "Python bindings for objstore-r (PyO3)."
+publish = false
+
+[lib]
+name = "objstore_r"
+crate-type = ["cdylib"]
+
+[dependencies]
+# abi3-py312: one wheel per platform serves every Python from 3.12 up (and the
+# buffer protocol is in the stable ABI from 3.11).
+pyo3 = { version = "0.29", features = ["extension-module", "abi3-py312"] }
+# Aliased because this crate's own lib is named `objstore_r` (the module).
+objstore = { path = "../..", package = "objstore-r", features = ["gcs"] }
+# GCS requests run on a private runtime; memory and local-directory operations
+# complete synchronously and are driven without one.
+tokio = { version = "1.40", features = ["rt-multi-thread"] }
+futures-executor = "0.3"
+futures-util = { version = "0.3", default-features = false, features = ["alloc"] }
+
+# Detach from the parent crate's build so its `cargo test` never needs Python.
+[workspace]
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 1
+strip = true

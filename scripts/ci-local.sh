@@ -45,8 +45,15 @@ step "tests (unit, conformance, property, security, doc)"
 PROPTEST_CASES="${PROPTEST_CASES:-512}" cargo test --all-features
 step "benches compile and run once"; cargo bench --all-features -- --test >/dev/null
 
+step "python wheel + pytest (uu-objstore-r)"
+if command -v python3 >/dev/null; then
+  (cd bindings/python && cargo fmt --check && cargo clippy -q --all-targets -- -D warnings \
+    && { [ -d .venv ] || python3 -m venv .venv; } && . .venv/bin/activate \
+    && pip install -q maturin pytest && maturin develop -q --release && pytest -q -rs tests/)
+else warn "python3 not found"; fi
+
 step security
-if have deny; then cargo deny --all-features check; else warn "cargo-deny not installed"; fi
+if have deny; then cargo deny --all-features check; (cd bindings/python && cargo deny check --config ../../deny.toml); else warn "cargo-deny not installed"; fi
 if have audit; then cargo audit; else warn "cargo-audit not installed"; fi
 grep -q '#!\[forbid(unsafe_code)\]' src/lib.rs
 if grep -rnE --include='*.rs' '\bdyn\b|\bArc<|Box<dyn' src/ tests/ benches/ | grep -vE '^[^:]+:[0-9]+:\s*//'; then echo "dyn in library code"; exit 1; fi

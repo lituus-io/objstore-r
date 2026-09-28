@@ -4,18 +4,42 @@ name: Release
 
 on:
   push:
-    tags: ['v*']
+    tags: ["v*"]
+  workflow_dispatch:
 
+# Least privilege by default; only the GitHub Release job is granted write.
 permissions:
   contents: read
 
 env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+  CARGO_INCREMENTAL: 0
   CARGO_TERM_COLOR: always
 
 jobs:
+  # A mistagged release ships a wheel whose metadata lies about its version;
+  # refuse before building anything.
+  version-gate:
+    name: Version gate
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Tag must match every manifest
+        run: |
+          set -euo pipefail
+          if [[ "$GITHUB_REF" == refs/tags/v* ]]; then
+            tag="${GITHUB_REF_NAME#v}"
+          else
+            tag=$(grep -m1 '^version = ' Cargo.toml | cut -d'"' -f2)
+          fi
+          for f in Cargo.toml bindings/python/Cargo.toml bindings/python/pyproject.toml; do
+            grep -q "^version = \"$tag\"" "$f" \
+              || { echo "::error::$f does not declare version $tag"; exit 1; }
+          done
+
   verify:
-    name: Verify tag
+    name: Verify crate
+    needs: version-gate
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -23,10 +47,6 @@ jobs:
           fetch-depth: 0
       - run: rustup show
       - uses: Swatinem/rust-cache@v2
-      - name: Tag matches the manifest version
-        run: |
-          v=$(cargo metadata --no-deps --format-version 1 | python3 -c 'import json,sys; print(json.load(sys.stdin)["packages"][0]["version"])')
-          test "v$v" = "${GITHUB_REF_NAME}" || { echo "tag ${GITHUB_REF_NAME} != v$v"; exit 1; }
       - run: cargo test --all-features
       - run: cargo package --allow-dirty --no-verify --list
       # API compatibility against the previous release tag (skipped for the
@@ -36,7 +56,123 @@ jobs:
           prev=$(git tag --sort=-v:refname | grep -v "^${GITHUB_REF_NAME}$" | head -1 || true)
           if [ -n "$prev" ]; then
             RUSTUP_TOOLCHAIN=stable cargo install cargo-semver-checks --locked
-            cargo semver-checks --baseline-rev "$prev" --all-features
+            cargo semver-checks --baseline-rev "$prev" --all-features --release-type minor
           else
             echo "first release: no baseline"
           fi
+
+  # One abi3 wheel per platform: the binding builds against the stable ABI
+  # (abi3-py312), so a single artifact serves Python 3.12 and everything later.
+  build-wheel:
+    name: Wheel (${{ matrix.name }})
+    needs: version-gate
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # Linux builds go through zig so the wheel links against
+          # manylinux_2_28 glibc rather than the runner's (too-new) one.
+          - { name: linux-x86_64, runner: ubuntu-latest, target: x86_64-unknown-linux-gnu, args: "--zig --compatibility manylinux_2_28" }
+          - { name: linux-aarch64, runner: ubuntu-24.04-arm, target: aarch64-unknown-linux-gnu, args: "--zig --compatibility manylinux_2_28" }
+          - { name: macos-x86_64, runner: macos-15, target: x86_64-apple-darwin, args: "" }
+          - { name: macos-arm64, runner: macos-15, target: aarch64-apple-darwin, args: "" }
+          - { name: windows-x86_64, runner: windows-latest, target: x86_64-pc-windows-msvc, args: "" }
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install the pinned toolchain
+        shell: bash
+        run: |
+          rustup show
+          rustup target add ${{ matrix.target }}
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: bindings/python
+          key: wheel-${{ matrix.name }}
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install maturin (and zig for manylinux)
+        shell: bash
+        run: pip install maturin ziglang
+      - name: Build wheel
+        shell: bash
+        working-directory: bindings/python
+        run: maturin build --release --target ${{ matrix.target }} ${{ matrix.args }} --out dist
+      - name: Smoke the wheel (host-native builds only)
+        if: matrix.name != 'macos-x86_64'
+        shell: bash
+        working-directory: bindings/python
+        run: |
+          python -m venv .smoke
+          . .smoke/bin/activate 2>/dev/null || . .smoke/Scripts/activate
+          pip install dist/*.whl pytest
+          pytest tests/ -q
+      - name: Upload wheel
+        uses: actions/upload-artifact@v4
+        with:
+          name: wheel-${{ matrix.name }}
+          path: bindings/python/dist/*.whl
+
+  sdist:
+    name: Source distribution
+    needs: version-gate
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install maturin
+      - working-directory: bindings/python
+        run: maturin sdist --out dist
+      - uses: actions/upload-artifact@v4
+        with:
+          name: wheel-sdist
+          path: bindings/python/dist/*.tar.gz
+
+  release:
+    name: GitHub Release
+    needs: [verify, build-wheel, sdist]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write # create the Release and upload assets
+    if: startsWith(github.ref, 'refs/tags/v')
+    steps:
+      - name: Download wheels
+        uses: actions/download-artifact@v4
+        with:
+          pattern: wheel-*
+          path: dist
+          merge-multiple: true
+      - name: Collect release files
+        run: |
+          cd dist && sha256sum * > SHA256SUMS.txt
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*
+          generate_release_notes: true
+
+  publish-pypi:
+    name: Publish uu-objstore-r to PyPI
+    needs: [verify, build-wheel, sdist]
+    runs-on: ubuntu-latest
+    # Tag-gated for real releases (pre-release tags with a '-' are not
+    # published); also runnable by hand to retry a publish-side failure.
+    if: (startsWith(github.ref, 'refs/tags/v') && !contains(github.ref, '-')) || github.event_name == 'workflow_dispatch'
+    steps:
+      - name: Download wheels
+        uses: actions/download-artifact@v4
+        with:
+          pattern: wheel-*
+          path: dist
+          merge-multiple: true
+      - name: Publish via twine
+        env:
+          TWINE_USERNAME: __token__
+          TWINE_PASSWORD: ${{ secrets.PYPI_PACKAGE }}
+        run: |
+          pip install twine
+          twine check dist/*
+          twine upload --verbose --skip-existing dist/*

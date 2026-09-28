@@ -147,3 +147,44 @@ jobs:
         run: |
           cargo llvm-cov --all-features --summary-only --fail-under-lines 80 | tee coverage.txt
           { echo "### Coverage"; echo; echo '```'; cat coverage.txt; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
+
+  python:
+    name: Python bindings (${{ matrix.os }})
+    needs: fmt
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-15, windows-latest]
+    steps:
+      - uses: actions/checkout@v4
+      - run: rustup show
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: bindings/python
+          key: pyo3-${{ matrix.os }}
+      - uses: actions/setup-python@v5
+        with:
+          # 3.12 is the abi3 floor; the same wheel loads on every later version.
+          python-version: "3.12"
+      - name: Start fake-gcs-server (linux)
+        if: runner.os == 'Linux'
+        run: |
+          docker run -d --name fakegcs -p 4443:4443 fsouza/fake-gcs-server \
+            -scheme http -port 4443 -public-host 127.0.0.1:4443 -external-url http://127.0.0.1:4443
+          for i in $(seq 1 30); do curl -sf "http://127.0.0.1:4443/storage/v1/b?project=test" && break; sleep 1; done
+          echo "OBJSTORE_FAKE_GCS=http://127.0.0.1:4443" >> "$GITHUB_ENV"
+      - name: Fmt and clippy the binding
+        working-directory: bindings/python
+        run: |
+          cargo fmt --check
+          cargo clippy --all-targets
+      - name: Build and test the wheel in place
+        working-directory: bindings/python
+        shell: bash
+        run: |
+          python -m venv .venv
+          . .venv/bin/activate 2>/dev/null || . .venv/Scripts/activate
+          pip install maturin pytest
+          maturin develop --release
+          pytest tests/ -v -rs

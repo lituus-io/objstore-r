@@ -82,6 +82,19 @@ own credential stack implement the `TokenProvider` GAT trait. Tokens are cached
 until a minute before expiry; their `Debug` output is redacted, and no error
 message ever contains one.
 
+## Python
+
+`pip install uu-objstore-r` → `import objstore_r`: the same stores and
+guarantees from Python (see `bindings/python/README.md`).
+
+```python
+import objstore_r
+store = objstore_r.Store.gcs("my-bucket")            # ADC; .local(path) / .memory() alike
+g = store.put("state/HEAD", b"v1", create_only=True)
+store.put("state/HEAD", b"v2", if_generation=g)      # compare-and-swap
+view = memoryview(store.get("state/HEAD"))           # zero-copy
+```
+
 ## Testing
 
 | Layer | Where |

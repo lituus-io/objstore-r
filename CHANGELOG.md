@@ -14,3 +14,11 @@ First release.
   response resolution, size caps, no redirects, TLS-only outside loopback).
 - Token providers: `Static`, `Metadata`, `GcloudUser`, `Adc::discover`.
 - `testing::conformance` suite (feature `testing`).
+- `Mem::inject_after` / `Fault::Pass` / `clear_faults` for step-targeted
+  crash tests.
+- Python bindings: **uu-objstore-r** (`import objstore_r`, abi3 wheel for
+  Python ≥ 3.12). One `Store` class over memory, local-directory and GCS
+  backends (ADC, token or anonymous), compare-and-swap writes, ranged and
+  concurrent reads, zero-copy `Blob` buffers, typed exceptions, GIL
+  released on every call; tested on memory, local directory, fake-gcs-server
+  and a live bucket. Release workflow builds and publishes the wheels.

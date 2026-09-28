@@ -4,3 +4,11 @@
 /fuzz/artifacts
 Cargo.lock.bak
 *.profraw
+
+# Python binding build/venv
+bindings/python/.venv/
+bindings/python/target/
+bindings/python/dist/
+__pycache__/
+.pytest_cache/
+*.so
