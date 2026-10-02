@@ -88,10 +88,10 @@ fn is_device_name(seg: &str) -> bool {
             && upper.as_bytes()[3].is_ascii_digit())
 }
 
-/// Percent-encode a key for a URL path component (RFC 3986 unreserved kept;
-/// `/` encoded, as the GCS JSON API requires for object names).
-#[cfg(feature = "gcs")]
-pub(crate) fn encode_component(s: &str, out: &mut String) {
+/// Percent-encode `s` as one URL path or query component (RFC 3986
+/// unreserved kept; `/` encoded, as the GCS JSON API requires for object
+/// names), appending to `out`.
+pub fn encode_component(s: &str, out: &mut String) {
     const HEX: &[u8; 16] = b"0123456789ABCDEF";
     for b in s.bytes() {
         if b.is_ascii_alphanumeric() || matches!(b, b'-' | b'.' | b'_' | b'~') {
@@ -116,7 +116,6 @@ pub fn fuzz(input: &[u8]) {
         assert!(!k.starts_with('/') && !k.ends_with('/') && !k.contains("//"));
         assert!(k.split('/').all(|seg| seg != "." && seg != ".." && !seg.starts_with('.')));
         assert!(k.bytes().all(|b| b.is_ascii_graphic() && b != b'\\'));
-        #[cfg(feature = "gcs")]
         {
             let mut enc = String::new();
             encode_component(k, &mut enc);
@@ -163,7 +162,6 @@ mod tests {
         assert!(check_prefix("/").is_err() && check_prefix("../").is_err());
     }
 
-    #[cfg(feature = "gcs")]
     #[test]
     fn encoding() {
         let mut s = String::new();

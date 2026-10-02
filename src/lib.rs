@@ -51,7 +51,7 @@
 //! # Ok::<(), objstore_r::Error>(()) }).unwrap();
 //! ```
 
-#![cfg_attr(feature = "gcs", feature(impl_trait_in_assoc_type))]
+#![cfg_attr(feature = "http", feature(impl_trait_in_assoc_type))]
 #![forbid(unsafe_code)]
 #![deny(missing_docs)]
 #![deny(missing_debug_implementations)]
@@ -70,10 +70,14 @@ pub mod error;
 pub mod key;
 pub mod local;
 pub mod mem;
+mod net;
+pub mod transport;
 
 #[cfg(feature = "gcs")]
 pub mod gcs;
-#[cfg(feature = "gcs")]
+#[cfg(feature = "http")]
+pub mod http;
+#[cfg(feature = "http")]
 pub mod token;
 
 #[cfg(feature = "testing")]

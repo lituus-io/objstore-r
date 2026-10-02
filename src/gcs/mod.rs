@@ -24,6 +24,7 @@ mod wire;
 pub use wire::fuzz as fuzz_wire;
 
 use crate::key::{check_prefix, encode_component};
+use crate::net::{backoff, is_allowed_endpoint, is_retriable_status, transport_error};
 use crate::token::TokenProvider;
 use crate::{Bytes, Cond, Error, Key, Meta, Object, ObjectStore, Result};
 use std::future::Future;
@@ -76,7 +77,7 @@ impl<T: TokenProvider> Gcs<T> {
             return Err(Error::InvalidKey { reason: "invalid bucket name" });
         }
         let endpoint = cfg.endpoint.trim_end_matches('/').to_owned();
-        if !(endpoint.starts_with("https://") || is_loopback_http(&endpoint)) {
+        if !is_allowed_endpoint(&endpoint) {
             return Err(Error::protocol(
                 "the endpoint must be https:// (http:// only for a loopback emulator)",
             ));
@@ -129,7 +130,7 @@ impl<T: TokenProvider> Gcs<T> {
             let rb = self.authed(build()).await?;
             let outcome = rb.send().await;
             let retry = match &outcome {
-                Ok(r) => is_retriable_status(r.status()),
+                Ok(r) => is_retriable_status(r.status().as_u16()),
                 Err(e) => e.is_timeout() || e.is_connect() || e.is_request(),
             };
             if !retry || attempt >= self.cfg.max_retries {
@@ -401,37 +402,6 @@ pub(crate) fn is_valid_bucket(b: &str) -> bool {
         && b.bytes().last().is_some_and(|c| c.is_ascii_alphanumeric())
 }
 
-fn is_loopback_http(url: &str) -> bool {
-    ["http://127.0.0.1:", "http://127.0.0.1/", "http://localhost:", "http://[::1]:"]
-        .iter()
-        .any(|p| url.starts_with(p))
-}
-
-fn is_retriable_status(s: reqwest::StatusCode) -> bool {
-    matches!(s.as_u16(), 408 | 429 | 500 | 502 | 503 | 504)
-}
-
-/// 100 ms × 2^(n-1), capped at 5 s, with jitter over its upper half.
-fn backoff(attempt: u32) -> Duration {
-    let base = 100u64.saturating_mul(1 << attempt.saturating_sub(1).min(6)).min(5_000);
-    Duration::from_millis(base / 2 + jitter() % (base / 2 + 1))
-}
-
-/// A cheap, well-mixed pseudo-random number (xorshift over a time-seeded counter);
-/// only used to de-synchronize retries, never for anything security-relevant.
-fn jitter() -> u64 {
-    use std::sync::atomic::{AtomicU64, Ordering};
-    static STATE: AtomicU64 = AtomicU64::new(0x9E37_79B9_7F4A_7C15);
-    let nanos = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map_or(0, |d| d.subsec_nanos());
-    let mut x = STATE.fetch_add(u64::from(nanos) | 1, Ordering::Relaxed);
-    x ^= x << 13;
-    x ^= x >> 7;
-    x ^= x << 17;
-    x
-}
-
 fn generation_header(resp: &reqwest::Response) -> Option<u64> {
     resp.headers()
         .get("x-goog-generation")
@@ -440,36 +410,10 @@ fn generation_header(resp: &reqwest::Response) -> Option<u64> {
         .filter(|g| *g != 0)
 }
 
-fn transport_error(e: &reqwest::Error) -> Error {
-    let kind = if e.is_timeout() {
-        "timed out"
-    } else if e.is_connect() {
-        "connection failed"
-    } else {
-        "request failed"
-    };
-    Error::unavailable(kind, e.is_timeout() || e.is_connect() || e.is_request())
-}
-
 async fn status_error(resp: reqwest::Response) -> Error {
-    let status = resp.status();
-    // A short excerpt of the server's message (never our request or token).
-    let excerpt: String = resp
-        .bytes()
-        .await
-        .ok()
-        .map(|b| {
-            String::from_utf8_lossy(&b[..b.len().min(200)])
-                .chars()
-                .filter(|c| !c.is_control())
-                .collect()
-        })
-        .unwrap_or_default();
-    match status.as_u16() {
-        401 | 403 => Error::Auth { message: format!("{status}: {excerpt}") },
-        s if is_retriable_status(status) => Error::unavailable(format!("{s}: {excerpt}"), true),
-        _ => Error::protocol(format!("{status}: {excerpt}")),
-    }
+    let status = resp.status().as_u16();
+    let body = resp.bytes().await.unwrap_or_default();
+    crate::net::status_error(status, &body)
 }
 
 #[cfg(test)]
@@ -490,13 +434,5 @@ mod tests {
         );
         assert!(Gcs::new("bkt", t(), cfg("http://127.0.0.1:4443")).is_ok());
         assert!(Gcs::new("bkt", t(), cfg("https://storage.googleapis.com/")).is_ok());
-    }
-
-    #[test]
-    fn backoff_is_bounded() {
-        for n in 1..20 {
-            let d = backoff(n);
-            assert!(d <= Duration::from_millis(5_000) && d >= Duration::from_millis(25), "{d:?}");
-        }
     }
 }

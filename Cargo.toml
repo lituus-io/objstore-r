@@ -18,9 +18,15 @@ categories = ["filesystem", "database-implementations", "asynchronous"]
 # Install-by-requirement: the default build is the trait, the local-directory
 # store and the in-memory store, with no network dependency.
 default = []
-# Google Cloud Storage over the JSON API (reqwest + rustls), with ADC token
-# providers (metadata server, gcloud user credentials, static tokens).
-gcs = ["dep:reqwest", "dep:serde", "dep:serde_json", "dep:tokio"]
+# Authorised HTTPS transport (reqwest + rustls) for Google REST APIs, with ADC
+# token providers (metadata server, gcloud user credentials, static tokens).
+# The `transport::Transport` trait itself is always compiled.
+http = ["dep:reqwest", "dep:serde", "dep:serde_json", "dep:tokio"]
+# Google Cloud Storage over the JSON API, on the `http` stack.
+gcs = ["http"]
+# `http::block_on`: drive the transport from a synchronous `main` (CLIs)
+# without the caller depending on an async runtime.
+blocking = ["http", "tokio/rt"]
 # The reusable conformance suite, for crates implementing `ObjectStore`.
 testing = []
 

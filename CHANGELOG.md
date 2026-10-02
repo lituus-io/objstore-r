@@ -1,5 +1,29 @@
 # Changelog
 
+## Unreleased
+
+- `transport::Transport` / `BodyStream`: a dependency-free GAT seam for
+  authorised HTTPS calls to Google REST APIs beyond Cloud Storage (Vertex AI,
+  BigQuery). `send` returns the whole bounded body; `open` streams chunks, and
+  dropping the stream cancels the request. Per-request `Retry` policy
+  (`Transient`, `Throttled` for non-idempotent calls, `Never`);
+  `Response::error_for_status` maps statuses to the crate's typed errors.
+- `http::Client<T: TokenProvider>` (new feature `http`): the reqwest/rustls
+  implementation — HTTPS only (loopback `http` for tests), redirects refused,
+  bounded bodies (zero-copy for single-chunk responses), bearer and
+  quota-project headers, jittered backoff honouring `Retry-After` (capped at
+  30 s). Caller-supplied `authorization` headers are refused.
+- Feature `gcs` now implies `http`; the `token` module is available with
+  `http` alone. GCS behaviour is unchanged: its retry, backoff and error
+  mapping moved to a shared internal module used by both clients.
+- `key::encode_component` (also re-exported from `transport`) is public and
+  no longer feature-gated.
+- `transport::Method::Patch` and `Request::patch_json` (retried only when the
+  server provably did not start the work; pair with an `If-Match` header).
+- `http::block_on` (new feature `blocking`): drive the transport from a
+  synchronous `main` on a single-threaded runtime, so command-line tools need
+  no async runtime dependency of their own.
+
 ## 0.1.0 — unreleased
 
 First release.

@@ -9,7 +9,8 @@ plain copy.
 
 ```toml
 objstore-r = { path = "../objstore-r" }                     # LocalDir + Mem, no HTTP stack
-objstore-r = { path = "../objstore-r", features = ["gcs"] } # + Google Cloud Storage
+objstore-r = { path = "../objstore-r", features = ["http"] } # + authorised HTTPS transport
+objstore-r = { path = "../objstore-r", features = ["gcs"] }  # + Google Cloud Storage (implies http)
 ```
 
 ```rust
@@ -71,7 +72,15 @@ percent-encoding for URLs. Anything else is `Error::InvalidKey` before any I/O.
   conflict. Responses are size-capped, redirects are refused, and plain `http`
   is accepted only for a loopback emulator endpoint.
 
-### Credentials (feature `gcs`)
+### Other Google APIs (feature `http`)
+
+`http::Client<T: TokenProvider>` implements the dependency-free
+`transport::Transport` trait: authorised HTTPS with the same TLS stack,
+tokens, retries and size caps as the GCS backend, for Vertex AI, BigQuery or
+any Google REST API. `send` returns a bounded body; `open` streams chunks
+(server-sent events) and cancels the request when the stream is dropped.
+
+### Credentials (features `http` / `gcs`)
 
 `token::Adc::discover()` follows Application Default Credentials for the cases
 that need no private-key signing: `GOOGLE_APPLICATION_CREDENTIALS` or gcloud's
