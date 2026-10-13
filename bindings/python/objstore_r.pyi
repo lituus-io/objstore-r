@@ -1,5 +1,5 @@
-# Copyright: lituus-io, all rights reserved.
-# Author: terekete <spicyzhug@gmail.com>
+# Author: support@lituus.io
+# Copyright: lituus-io, all rights reserved
 """One object-store API over Google Cloud Storage, a local directory and memory."""
 
 from collections.abc import Buffer

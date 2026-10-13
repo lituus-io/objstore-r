@@ -1,5 +1,5 @@
-// Copyright: lituus-io, all rights reserved.
-// Author: terekete <spicyzhug@gmail.com>
+// Author: support@lituus.io
+// Copyright: lituus-io, all rights reserved
 //
 // The generic authorised HTTP transport (feature `http`) against a scripted
 // server: retry policies, redirect refusal, size limits, header handling,

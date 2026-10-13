@@ -1,5 +1,5 @@
-// Copyright: lituus-io, all rights reserved.
-// Author: terekete <spicyzhug@gmail.com>
+// Author: support@lituus.io
+// Copyright: lituus-io, all rights reserved
 //
 //! [`Client`]: the reqwest-backed [`Transport`] (feature `http`).
 //!
@@ -173,10 +173,10 @@ impl<T: TokenProvider> Client<T> {
     }
 }
 
-/// `Retry-After` in seconds (the HTTP-date form is ignored), capped.
+/// The response's `Retry-After` (either form), capped.
 fn retry_after(resp: &reqwest::Response) -> Option<Duration> {
-    let s = resp.headers().get("retry-after")?.to_str().ok()?.trim().parse::<u64>().ok()?;
-    Some(Duration::from_secs(s).min(MAX_RETRY_AFTER))
+    let v = resp.headers().get("retry-after")?.to_str().ok()?;
+    Some(crate::net::retry_after(v, graph_r::fsio::now_ms())?.min(MAX_RETRY_AFTER))
 }
 
 /// A bounded chunked body. Dropping it aborts the transfer.

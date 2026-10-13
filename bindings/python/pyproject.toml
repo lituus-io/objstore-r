@@ -1,5 +1,5 @@
-# Copyright: lituus-io, all rights reserved.
-# Author: terekete <spicyzhug@gmail.com>
+# Author: support@lituus.io
+# Copyright: lituus-io, all rights reserved
 
 [build-system]
 requires = ["maturin>=1.5,<2.0"]
@@ -9,13 +9,13 @@ build-backend = "maturin"
 # Distribution `uu-objstore-r`, matching its siblings `uu-graph-r` and
 # `uu-link-r`; the module this wheel ships is `objstore_r`.
 name = "uu-objstore-r"
-version = "0.1.0"
+version = "0.2.0"
 description = "One object-store API over Google Cloud Storage, a local directory and memory: generation preconditions (compare-and-swap), ranged reads, zero-copy buffers."
 # abi3-py312 is the floor the Rust side builds against.
 requires-python = ">=3.12"
 readme = "README.md"
 license = "AGPL-3.0-or-later OR LicenseRef-Proprietary"
-authors = [{ name = "lituus-io", email = "spicyzhug@gmail.com" }]
+authors = [{ name = "lituus-io", email = "support@lituus.io" }]
 keywords = ["object-storage", "gcs", "google-cloud-storage", "compare-and-swap", "zero-copy"]
 classifiers = [
     "Programming Language :: Rust",

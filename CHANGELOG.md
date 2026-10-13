@@ -1,6 +1,22 @@
 # Changelog
 
-## Unreleased
+## 0.2.0
+
+- Published as **uu-objstore-r** on crates.io (the library is still
+  `objstore_r`).
+- Feature `mirror` (`objstore_r::mirror`, formerly the graph-r-mirror crate):
+  sync a graph-r store with an object store.
+- Builds on graph-r's core (atomic files, locks, clock, xxh3).
+- `fenced`: the single-writer publish protocol (`put_immutable`, `cas`,
+  `fetch_verified`, sealed records), shared by graph-r-mirror and
+  link-r-objstore; `Error::{Fenced, Corrupt}`.
+- `transport::ApiError` and `Response::api_error`: Google error envelopes
+  (reason, message, code) for every client of the stack.
+- `sse::SseDecoder` (from crab-llm), `join::{join_all, spin_on}` (from
+  crab-core), and a public `net` policy (`is_retriable_status`, `backoff`,
+  `retry_after` in both forms).
+- `testing`: `unique`, `clean`, `live_bucket`, `emulator_bucket`, and a 9 MiB
+  resumable-upload case in the conformance suite.
 
 - `transport::Transport` / `BodyStream`: a dependency-free GAT seam for
   authorised HTTPS calls to Google REST APIs beyond Cloud Storage (Vertex AI,

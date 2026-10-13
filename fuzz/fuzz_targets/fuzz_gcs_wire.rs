@@ -1,5 +1,5 @@
-// Copyright: lituus-io, all rights reserved.
-// Author: terekete <spicyzhug@gmail.com>
+// Author: support@lituus.io
+// Copyright: lituus-io, all rights reserved
 //
 //! Arbitrary bytes as a GCS JSON API response (object resource or listing
 //! page): typed error or clean parse, never a panic.

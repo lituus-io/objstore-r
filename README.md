@@ -1,16 +1,18 @@
 # objstore-r
 
-A small object-store abstraction shared by [graph-r](../graph-r) and
-[link-r](../link-r): one GAT trait, three backends, generation preconditions
+A small object-store abstraction shared by
+[graph-r](https://github.com/lituus-io/graph-r) and
+[link-r](https://github.com/lituus-io/link-r): one GAT trait, three backends, generation preconditions
 everywhere. It exists so both libraries can keep their on-disk formats
 byte-for-byte and still live on Google Cloud Storage: an object holds exactly
 the bytes of a local file, and moving a store between disk and a bucket is a
 plain copy.
 
 ```toml
-objstore-r = { path = "../objstore-r" }                     # LocalDir + Mem, no HTTP stack
-objstore-r = { path = "../objstore-r", features = ["http"] } # + authorised HTTPS transport
-objstore-r = { path = "../objstore-r", features = ["gcs"] }  # + Google Cloud Storage (implies http)
+uu-objstore-r = "0.2"                                      # LocalDir + Mem, no HTTP stack
+uu-objstore-r = { version = "0.2", features = ["http"] }   # + authorised HTTPS transport
+uu-objstore-r = { version = "0.2", features = ["gcs"] }    # + Google Cloud Storage (implies http)
+uu-objstore-r = { version = "0.2", features = ["mirror"] } # + graph-r store mirroring
 ```
 
 ```rust
@@ -71,6 +73,16 @@ percent-encoding for URLs. Anything else is `Error::InvalidKey` before any I/O.
   reading back and comparing bytes, so a retried CAS never reports a spurious
   conflict. Responses are size-capped, redirects are refused, and plain `http`
   is accepted only for a loopback emulator endpoint.
+
+### Fenced publishing and graph-r mirroring
+
+`fenced` is the single-writer publish protocol every snapshot publisher
+shares: create-only immutable objects, a sealed `HEAD` record swapped by
+compare-and-swap (a lost response is recognised by reading back; a racing
+writer gets `Error::Fenced`), and verified fetches. Feature `mirror` builds
+graph-r store mirroring on it (`mirror::Mirror`): byte-identical base and
+log files, incremental log shipping, leases, replicas refreshed with one
+metadata request when nothing changed.
 
 ### Other Google APIs (feature `http`)
 

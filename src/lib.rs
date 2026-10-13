@@ -1,5 +1,5 @@
-// Copyright: lituus-io, all rights reserved.
-// Author: terekete <spicyzhug@gmail.com>
+// Author: support@lituus.io
+// Copyright: lituus-io, all rights reserved
 //
 //! # objstore-r
 //!
@@ -67,10 +67,15 @@
 )]
 
 pub mod error;
+pub mod fenced;
+pub mod join;
 pub mod key;
 pub mod local;
 pub mod mem;
-mod net;
+#[cfg(feature = "mirror")]
+pub mod mirror;
+pub mod net;
+pub mod sse;
 pub mod transport;
 
 #[cfg(feature = "gcs")]

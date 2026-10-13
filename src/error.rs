@@ -1,5 +1,5 @@
-// Copyright: lituus-io, all rights reserved.
-// Author: terekete <spicyzhug@gmail.com>
+// Author: support@lituus.io
+// Copyright: lituus-io, all rights reserved
 //
 //! Errors.
 
@@ -52,6 +52,19 @@ pub enum Error {
         /// What was wrong.
         message: String,
     },
+    /// A fenced publish lost to another writer (see [`crate::fenced`]).
+    /// Stop writing; re-read before publishing again.
+    #[error("fenced: {reason}")]
+    Fenced {
+        /// Why.
+        reason: &'static str,
+    },
+    /// Published data failed verification against the record naming it.
+    #[error("corrupt: {message}")]
+    Corrupt {
+        /// What was wrong.
+        message: String,
+    },
     /// Local I/O.
     #[error("i/o: {source}")]
     Io {
@@ -71,6 +84,10 @@ impl Error {
     #[cfg_attr(not(any(feature = "gcs", test)), allow(dead_code))]
     pub(crate) fn unavailable(message: impl Into<String>, retriable: bool) -> Self {
         Error::Unavailable { message: message.into(), retriable }
+    }
+
+    pub(crate) fn corrupt(message: impl Into<String>) -> Self {
+        Error::Corrupt { message: message.into() }
     }
 
     #[cfg_attr(not(feature = "gcs"), allow(dead_code))]

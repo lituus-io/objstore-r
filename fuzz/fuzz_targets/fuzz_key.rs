@@ -1,5 +1,5 @@
-// Copyright: lituus-io, all rights reserved.
-// Author: terekete <spicyzhug@gmail.com>
+// Author: support@lituus.io
+// Copyright: lituus-io, all rights reserved
 //
 //! Arbitrary bytes as a key or prefix: classified without panicking, and
 //! anything accepted can never name a path outside a store root.

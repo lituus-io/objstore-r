@@ -1,7 +1,8 @@
-// Copyright: lituus-io, all rights reserved.
-// Author: terekete <spicyzhug@gmail.com>
+// Author: support@lituus.io
+// Copyright: lituus-io, all rights reserved
 //
-//! A conformance suite for [`ObjectStore`] implementations (feature `testing`).
+//! A conformance suite for [`ObjectStore`] implementations, and the harness
+//! every live test of the stack shares (feature `testing`).
 //!
 //! Every backend in this crate passes it, and crates wrapping other storage in
 //! the trait (for example an application's own GCS client) can run it too:
@@ -114,6 +115,28 @@ pub async fn conformance<S: ObjectStore>(s: &S, prefix: &str) -> Result<(), Stri
         "ranges of a large object"
     );
 
+    // Above the resumable threshold (8 MiB by default): chunked uploads, and
+    // ranges that cross a chunk boundary.
+    let huge: Bytes = (0..(9u32 << 20))
+        .map(|i| (i.wrapping_mul(2_246_822_519) >> 25) as u8)
+        .collect::<Vec<u8>>()
+        .into();
+    s.put(&k("huge"), huge.clone(), Cond::CreateOnly).await.map_err(e)?;
+    ensure!(
+        s.head(&k("huge")).await.map_err(e)?.is_some_and(|m| m.size == huge.len() as u64),
+        "a 9 MiB object reports its size"
+    );
+    let edge = (8u64 << 20) - 5;
+    ensure!(
+        s.get_range(&k("huge"), edge..edge + 10).await.map_err(e)?
+            == huge.slice(edge as usize..edge as usize + 10),
+        "a range across the 8 MiB boundary"
+    );
+    ensure!(
+        s.get(&k("huge")).await.map_err(e)?.is_some_and(|o| o.bytes == huge),
+        "a 9 MiB object round-trips exactly"
+    );
+
     // Listing: sorted, prefix-scoped, nested keys.
     s.put(&k("dir/x"), Bytes::from_static(b"1"), Cond::None).await.map_err(e)?;
     s.put(&k("dir/y/z"), Bytes::from_static(b"22"), Cond::None).await.map_err(e)?;
@@ -151,4 +174,57 @@ pub async fn conformance<S: ObjectStore>(s: &S, prefix: &str) -> Result<(), Stri
         "cleanup left objects behind"
     );
     Ok(())
+}
+
+/// A unique key prefix for one test run: `tag-pid-nanos`.
+#[must_use]
+pub fn unique(tag: &str) -> String {
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_nanos());
+    format!("{tag}-{}-{nanos}", std::process::id())
+}
+
+/// Delete everything under `prefix/` and confirm nothing is left.
+pub async fn clean<S: ObjectStore>(s: &S, prefix: &str) -> Result<(), String> {
+    let dir = format!("{}/", prefix.trim_end_matches('/'));
+    for m in s.list(&dir).await.map_err(|e| e.to_string())? {
+        s.delete(&m.key).await.map_err(|e| e.to_string())?;
+    }
+    if s.list(&dir).await.map_err(|e| e.to_string())?.is_empty() {
+        Ok(())
+    } else {
+        Err(format!("{dir} not empty after cleanup"))
+    }
+}
+
+/// The live bucket named by `OBJSTORE_LIVE_BUCKET`, through Application
+/// Default Credentials; `None` (skip) when unset.
+#[cfg(feature = "gcs")]
+#[must_use]
+pub fn live_bucket() -> Option<crate::Gcs<crate::token::Adc>> {
+    let bucket = std::env::var("OBJSTORE_LIVE_BUCKET").ok()?;
+    let adc = crate::token::Adc::discover().expect("credentials for the live bucket");
+    Some(crate::Gcs::new(&bucket, adc, crate::GcsConfig::default()).expect("live bucket name"))
+}
+
+/// A fresh bucket on the fake-gcs-server named by `OBJSTORE_FAKE_GCS`, with
+/// uploads above `resumable_threshold` bytes resumable; `None` (skip) when
+/// unset.
+#[cfg(feature = "gcs")]
+pub async fn emulator_bucket(
+    resumable_threshold: usize,
+) -> Option<crate::Gcs<crate::token::Static>> {
+    let endpoint = std::env::var("OBJSTORE_FAKE_GCS").ok()?;
+    let bucket = unique("objstore-r").replace('_', "-");
+    let resp = reqwest::Client::new()
+        .post(format!("{endpoint}/storage/v1/b?project=test"))
+        .header("content-type", "application/json")
+        .body(format!(r#"{{"name":"{bucket}"}}"#))
+        .send()
+        .await
+        .expect("fake-gcs-server reachable");
+    assert!(resp.status().is_success(), "bucket creation: {}", resp.status());
+    let cfg = crate::GcsConfig { endpoint, resumable_threshold, ..crate::GcsConfig::default() };
+    Some(crate::Gcs::new(&bucket, crate::token::Static::none(), cfg).expect("emulator bucket"))
 }

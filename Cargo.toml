@@ -1,16 +1,19 @@
-# Copyright: lituus-io, all rights reserved.
-# Author: terekete <spicyzhug@gmail.com>
+# Author: support@lituus.io
+# Copyright: lituus-io, all rights reserved
 
 [package]
-name = "objstore-r"
-version = "0.1.0"
+name = "uu-objstore-r"
+version = "0.2.0"
 edition = "2021"
 rust-version = "1.89" # std File::lock (the pinned nightly is newer)
 license = "AGPL-3.0-or-later"
-description = "Object stores with generation preconditions for immutable-snapshot data: local directory, in-memory (fault injection), Google Cloud Storage"
+description = "Object stores with generation preconditions for immutable-snapshot data (local directory, in-memory with fault injection, Google Cloud Storage), fenced single-writer publishing, and graph-r store mirroring"
 repository = "https://github.com/lituus-io/objstore-r"
-authors = ["lituus-io <spicyzhug@gmail.com>"]
-publish = false
+authors = ["lituus-io <support@lituus.io>"]
+homepage = "https://github.com/lituus-io/objstore-r"
+documentation = "https://docs.rs/uu-objstore-r"
+readme = "README.md"
+exclude = ["/.github", "/scripts", "/bindings", "/fuzz"]
 keywords = ["object-store", "gcs", "storage", "cas", "embedded"]
 categories = ["filesystem", "database-implementations", "asynchronous"]
 
@@ -29,8 +32,22 @@ gcs = ["http"]
 blocking = ["http", "tokio/rt"]
 # The reusable conformance suite, for crates implementing `ObjectStore`.
 testing = []
+# Sync a graph-r store directory with an object store: byte-identical files,
+# fenced single writer, incremental log shipping (`mirror` module).
+mirror = ["graph-r/store", "dep:futures-util"]
+
+[lib]
+name = "objstore_r"
+
+[package.metadata.docs.rs]
+features = ["gcs", "blocking", "testing", "mirror"]
 
 [dependencies]
+# The shared core: atomic files, locks, the clock, xxh3 (no store, no mmap).
+graph-r = { package = "uu-graph-r", path = "../graph-r", version = "0.4.0", default-features = false }
+# try_join_all: fetch a mirrored base and its log segments concurrently on the
+# caller's task (no spawn).
+futures-util = { version = "0.3", optional = true, default-features = false, features = ["alloc"] }
 bytes = "1.7"
 thiserror = "1.0"
 reqwest = { version = "0.12", optional = true, default-features = false, features = ["rustls-tls", "http2"] }
@@ -67,3 +84,21 @@ debug = true
 
 [workspace]
 members = []
+
+[[test]]
+name = "mirror"
+required-features = ["mirror"]
+
+[[test]]
+name = "mirror_gcs"
+required-features = ["mirror", "gcs", "testing"]
+
+[[test]]
+name = "proptest_mirror"
+required-features = ["mirror"]
+
+[[bench]]
+name = "mirror_bench"
+harness = false
+required-features = ["mirror"]
+

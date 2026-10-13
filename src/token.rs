@@ -1,5 +1,5 @@
-// Copyright: lituus-io, all rights reserved.
-// Author: terekete <spicyzhug@gmail.com>
+// Author: support@lituus.io
+// Copyright: lituus-io, all rights reserved
 //
 //! OAuth access tokens for Google APIs (feature `gcs`).
 //!
@@ -15,9 +15,10 @@
 //! [`AccessToken`]'s `Debug` is redacted.
 
 use crate::{Error, Result};
+use graph_r::fsio::now_ms;
 use std::future::Future;
 use std::sync::Mutex;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::Duration;
 
 const METADATA_TOKEN: &str =
     "http://metadata.google.internal/computeMetadata/v1/instance/service-accounts/default/token";
@@ -116,12 +117,6 @@ impl Cache {
     fn put(&self, t: &AccessToken) {
         *self.0.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = Some(t.clone());
     }
-}
-
-fn now_ms() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map_or(0, |d| u64::try_from(d.as_millis()).unwrap_or(u64::MAX))
 }
 
 #[derive(serde::Deserialize)]

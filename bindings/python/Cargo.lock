@@ -505,26 +505,14 @@ dependencies = [
 ]
 
 [[package]]
-name = "objstore-r"
-version = "0.1.0"
-dependencies = [
- "bytes",
- "reqwest",
- "serde",
- "serde_json",
- "thiserror 1.0.69",
- "tokio",
-]
-
-[[package]]
 name = "objstore-r-python"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "futures-executor",
  "futures-util",
- "objstore-r",
  "pyo3",
  "tokio",
+ "uu-objstore-r",
 ]
 
 [[package]]
@@ -1167,6 +1155,26 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b6c140620e7ffbb22c2dee59cafe6084a59b5ffc27a8859a5f0d494b5d52b6be"
 
 [[package]]
+name = "uu-graph-r"
+version = "0.4.0"
+dependencies = [
+ "xxhash-rust",
+]
+
+[[package]]
+name = "uu-objstore-r"
+version = "0.2.0"
+dependencies = [
+ "bytes",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "thiserror 1.0.69",
+ "tokio",
+ "uu-graph-r",
+]
+
+[[package]]
 name = "want"
 version = "0.3.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1359,6 +1367,12 @@ name = "writeable"
 version = "0.6.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "3ad82d2a33cdc9674dc7465672f271e096168fcdbe0f799d9e6db8c5892679dc"
+
+[[package]]
+name = "xxhash-rust"
+version = "0.8.19"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "550a2b930b62486a393c52d5c3b84bff264b28aa437ed64694d31e93b1757af7"
 
 [[package]]
 name = "yoke"

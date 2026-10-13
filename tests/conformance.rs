@@ -1,5 +1,5 @@
-// Copyright: lituus-io, all rights reserved.
-// Author: terekete <spicyzhug@gmail.com>
+// Author: support@lituus.io
+// Copyright: lituus-io, all rights reserved
 //
 // Every backend passes the same conformance suite. The GCS backend runs
 // against fake-gcs-server when `OBJSTORE_FAKE_GCS` is set (CI starts one),
@@ -22,45 +22,17 @@ fn local_dir_conforms() {
 
 #[cfg(feature = "gcs")]
 mod gcs {
-    use objstore_r::testing::conformance;
-    use objstore_r::token::{Adc, Static};
-    use objstore_r::{Gcs, GcsConfig};
-
-    fn unique(tag: &str) -> String {
-        let nanos =
-            std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos();
-        format!("{tag}-{}-{nanos}", std::process::id())
-    }
-
-    async fn fake_bucket(endpoint: &str) -> String {
-        let bucket = unique("objstore-r");
-        let resp = reqwest::Client::new()
-            .post(format!("{endpoint}/storage/v1/b?project=test"))
-            .header("content-type", "application/json")
-            .body(format!(r#"{{"name":"{bucket}"}}"#))
-            .send()
-            .await
-            .expect("fake-gcs-server reachable");
-        assert!(resp.status().is_success(), "bucket creation: {}", resp.status());
-        bucket
-    }
+    use objstore_r::testing::{conformance, emulator_bucket, live_bucket, unique};
 
     /// Against fake-gcs-server (`OBJSTORE_FAKE_GCS=http://127.0.0.1:4443`), with
-    /// single-request uploads and again with every upload forced resumable.
+    /// the default threshold and again with every upload forced resumable.
     #[tokio::test(flavor = "current_thread")]
     async fn gcs_conforms_on_the_emulator() {
-        let Ok(endpoint) = std::env::var("OBJSTORE_FAKE_GCS") else {
-            eprintln!("skipped: set OBJSTORE_FAKE_GCS to run against fake-gcs-server");
-            return;
-        };
         for threshold in [8 << 20, 1024] {
-            let bucket = fake_bucket(&endpoint).await;
-            let cfg = GcsConfig {
-                endpoint: endpoint.clone(),
-                resumable_threshold: threshold,
-                ..GcsConfig::default()
+            let Some(s) = emulator_bucket(threshold).await else {
+                eprintln!("skipped: set OBJSTORE_FAKE_GCS to run against fake-gcs-server");
+                return;
             };
-            let s = Gcs::new(&bucket, Static::none(), cfg).unwrap();
             conformance(&s, "suite").await.unwrap_or_else(|e| panic!("threshold {threshold}: {e}"));
         }
     }
@@ -70,11 +42,10 @@ mod gcs {
     /// deletes everything it wrote.
     #[tokio::test(flavor = "current_thread")]
     async fn gcs_conforms_live() {
-        let Ok(bucket) = std::env::var("OBJSTORE_LIVE_BUCKET") else {
+        let Some(s) = live_bucket() else {
             eprintln!("skipped: set OBJSTORE_LIVE_BUCKET to run against a real bucket");
             return;
         };
-        let s = Gcs::new(&bucket, Adc::discover().unwrap(), GcsConfig::default()).unwrap();
         conformance(&s, &unique("objstore-r-conformance")).await.unwrap();
     }
 }

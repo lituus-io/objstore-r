@@ -1,5 +1,5 @@
-# Copyright: lituus-io, all rights reserved.
-# Author: terekete <spicyzhug@gmail.com>
+# Author: support@lituus.io
+# Copyright: lituus-io, all rights reserved
 name: Security
 
 on:
@@ -24,6 +24,11 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      - name: Fetch the pinned sibling repositories
+        shell: bash
+        env:
+          SIBLING_TOKEN: ${{ secrets.SIBLING_REPO_TOKEN || github.token }}
+        run: scripts/fetch-siblings.sh
       - name: Install cargo-audit
         run: RUSTUP_TOOLCHAIN=stable cargo install cargo-audit --locked
       - run: cargo audit
@@ -33,6 +38,11 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      - name: Fetch the pinned sibling repositories
+        shell: bash
+        env:
+          SIBLING_TOKEN: ${{ secrets.SIBLING_REPO_TOKEN || github.token }}
+        run: scripts/fetch-siblings.sh
       - name: Install cargo-deny
         run: RUSTUP_TOOLCHAIN=stable cargo install cargo-deny --locked
       - run: cargo deny --all-features check
@@ -42,6 +52,11 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      - name: Fetch the pinned sibling repositories
+        shell: bash
+        env:
+          SIBLING_TOKEN: ${{ secrets.SIBLING_REPO_TOKEN || github.token }}
+        run: scripts/fetch-siblings.sh
       - run: rustup show
       - uses: Swatinem/rust-cache@v2
       # tests/security.rs: hostile keys, symlink escapes, nesting collisions,
@@ -63,6 +78,11 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      - name: Fetch the pinned sibling repositories
+        shell: bash
+        env:
+          SIBLING_TOKEN: ${{ secrets.SIBLING_REPO_TOKEN || github.token }}
+        run: scripts/fetch-siblings.sh
       - run: rustup show
       - uses: Swatinem/rust-cache@v2
       - name: Report panic-capable paths (library code)

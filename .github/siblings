@@ -1,0 +1,6 @@
+# Author: support@lituus.io
+# Copyright: lituus-io, all rights reserved
+#
+# Sibling repositories this one builds against, cloned beside the checkout
+# at these exact refs (scripts/fetch-siblings.sh). Bumped with each release.
+graph-r v0.4.0

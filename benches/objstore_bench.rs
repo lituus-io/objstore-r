@@ -1,5 +1,5 @@
-// Copyright: lituus-io, all rights reserved.
-// Author: terekete <spicyzhug@gmail.com>
+// Author: support@lituus.io
+// Copyright: lituus-io, all rights reserved
 
 use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
 use futures::executor::block_on;

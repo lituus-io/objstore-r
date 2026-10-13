@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# Copyright: lituus-io, all rights reserved.
-# Author: terekete <spicyzhug@gmail.com>
+# Author: support@lituus.io
+# Copyright: lituus-io, all rights reserved
 #
 # Run the CI gates locally, in the same order. Needs Docker for the GCS
 # emulator (skipped with a warning if absent) and optionally cargo-deny,

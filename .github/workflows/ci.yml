@@ -1,5 +1,5 @@
-# Copyright: lituus-io, all rights reserved.
-# Author: terekete <spicyzhug@gmail.com>
+# Author: support@lituus.io
+# Copyright: lituus-io, all rights reserved
 name: CI
 
 on:
@@ -26,6 +26,11 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      - name: Fetch the pinned sibling repositories
+        shell: bash
+        env:
+          SIBLING_TOKEN: ${{ secrets.SIBLING_REPO_TOKEN || github.token }}
+        run: scripts/fetch-siblings.sh
       - run: rustup show
       - run: cargo fmt --check
 
@@ -35,6 +40,11 @@ jobs:
     needs: fmt
     steps:
       - uses: actions/checkout@v4
+      - name: Fetch the pinned sibling repositories
+        shell: bash
+        env:
+          SIBLING_TOKEN: ${{ secrets.SIBLING_REPO_TOKEN || github.token }}
+        run: scripts/fetch-siblings.sh
       - run: rustup show
       - uses: Swatinem/rust-cache@v2
       - run: cargo clippy --all-features --all-targets
@@ -56,6 +66,11 @@ jobs:
           - { name: windows-x86_64, runner: windows-latest }
     steps:
       - uses: actions/checkout@v4
+      - name: Fetch the pinned sibling repositories
+        shell: bash
+        env:
+          SIBLING_TOKEN: ${{ secrets.SIBLING_REPO_TOKEN || github.token }}
+        run: scripts/fetch-siblings.sh
       - run: rustup show
       - uses: Swatinem/rust-cache@v2
         with:
@@ -70,6 +85,11 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      - name: Fetch the pinned sibling repositories
+        shell: bash
+        env:
+          SIBLING_TOKEN: ${{ secrets.SIBLING_REPO_TOKEN || github.token }}
+        run: scripts/fetch-siblings.sh
       - run: rustup show
       - uses: Swatinem/rust-cache@v2
         with:
@@ -84,7 +104,9 @@ jobs:
       - name: Conformance against the emulator (simple and resumable uploads)
         env:
           OBJSTORE_FAKE_GCS: http://127.0.0.1:4443
-        run: cargo test --all-features --test conformance -- --nocapture
+        run: |
+          cargo test --all-features --test conformance -- --nocapture
+          cargo test --all-features --test mirror_gcs -- --nocapture
 
   features:
     name: Feature matrix
@@ -92,13 +114,18 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      - name: Fetch the pinned sibling repositories
+        shell: bash
+        env:
+          SIBLING_TOKEN: ${{ secrets.SIBLING_REPO_TOKEN || github.token }}
+        run: scripts/fetch-siblings.sh
       - run: rustup show
       - uses: Swatinem/rust-cache@v2
       # `default = []` is the promise: LocalDir and Mem pull in no HTTP stack.
       - name: Each feature combination
         run: |
           set -euo pipefail
-          for f in "" "gcs" "testing" "gcs,testing"; do
+          for f in "" "gcs" "testing" "gcs,testing" "mirror" "mirror,gcs,testing"; do
             echo "::group::features=${f:-none}"
             if [ -z "$f" ]; then
               cargo check --no-default-features --all-targets
@@ -117,6 +144,11 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      - name: Fetch the pinned sibling repositories
+        shell: bash
+        env:
+          SIBLING_TOKEN: ${{ secrets.SIBLING_REPO_TOKEN || github.token }}
+        run: scripts/fetch-siblings.sh
       - run: rustup show
       - uses: Swatinem/rust-cache@v2
       - run: cargo doc --all-features --no-deps
@@ -129,6 +161,11 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      - name: Fetch the pinned sibling repositories
+        shell: bash
+        env:
+          SIBLING_TOKEN: ${{ secrets.SIBLING_REPO_TOKEN || github.token }}
+        run: scripts/fetch-siblings.sh
       - run: rustup show
       - run: rustup component add llvm-tools-preview
       - uses: Swatinem/rust-cache@v2
@@ -158,6 +195,11 @@ jobs:
         os: [ubuntu-latest, macos-15, windows-latest]
     steps:
       - uses: actions/checkout@v4
+      - name: Fetch the pinned sibling repositories
+        shell: bash
+        env:
+          SIBLING_TOKEN: ${{ secrets.SIBLING_REPO_TOKEN || github.token }}
+        run: scripts/fetch-siblings.sh
       - run: rustup show
       - uses: Swatinem/rust-cache@v2
         with:

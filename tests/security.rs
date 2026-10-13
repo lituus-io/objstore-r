@@ -1,5 +1,5 @@
-// Copyright: lituus-io, all rights reserved.
-// Author: terekete <spicyzhug@gmail.com>
+// Author: support@lituus.io
+// Copyright: lituus-io, all rights reserved
 //
 // Hostile inputs: traversal and injection through keys, symlink escapes from a
 // local root, and (feature `gcs`) a scripted HTTP server that redirects,

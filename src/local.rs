@@ -1,5 +1,5 @@
-// Copyright: lituus-io, all rights reserved.
-// Author: terekete <spicyzhug@gmail.com>
+// Author: support@lituus.io
+// Copyright: lituus-io, all rights reserved
 //
 //! A directory as an object store.
 //!
@@ -27,12 +27,13 @@
 
 use crate::key::check_prefix;
 use crate::{clip, Bytes, Cond, Error, Key, Meta, Object, ObjectStore, Result};
-use std::fs::{self, File, OpenOptions};
+use graph_r::fsio;
+use std::fs::{self, File};
 use std::future::{ready, Ready};
-use std::io::{Read, Seek, SeekFrom, Write};
+use std::io::{Read, Seek, SeekFrom};
 use std::ops::Range;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
+
 use std::sync::Mutex;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -50,7 +51,6 @@ pub struct LocalDir {
     /// Highest generation this handle has issued (keeps delete-then-recreate
     /// from reusing a generation within the process).
     last: Mutex<u64>,
-    tmp: AtomicU64,
 }
 
 impl LocalDir {
@@ -60,7 +60,7 @@ impl LocalDir {
         fs::create_dir_all(&root)?;
         let canon = root.canonicalize()?;
         let precision = probe_precision(&root)?;
-        Ok(Self { root, canon, precision, last: Mutex::new(0), tmp: AtomicU64::new(0) })
+        Ok(Self { root, canon, precision, last: Mutex::new(0) })
     }
 
     /// The root directory.
@@ -105,13 +105,7 @@ impl LocalDir {
     }
 
     fn lock(&self) -> Result<File> {
-        let f = OpenOptions::new()
-            .create(true)
-            .truncate(false)
-            .write(true)
-            .open(self.root.join(LOCK_FILE))?;
-        f.lock()?;
-        Ok(f)
+        Ok(fsio::lock(&self.root.join(LOCK_FILE))?)
     }
 
     fn next_generation(&self, current: Option<u64>) -> u64 {
@@ -147,26 +141,10 @@ impl LocalDir {
         })?;
         self.contained(dir)?;
         let generation = self.next_generation(current);
-        let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("obj");
-        let tmp = dir.join(format!(
-            ".{name}.{}.{}.tmp",
-            std::process::id(),
-            self.tmp.fetch_add(1, Ordering::Relaxed)
-        ));
-        let written = (|| -> std::io::Result<()> {
-            let mut f = OpenOptions::new().write(true).create_new(true).open(&tmp)?;
-            f.write_all(body)?;
-            f.set_modified(UNIX_EPOCH + Duration::from_nanos(generation))?;
-            f.sync_all()?;
-            drop(f);
-            fs::rename(&tmp, &path)?;
-            sync_dir(dir);
-            Ok(())
-        })();
-        if let Err(e) = written {
-            let _ = fs::remove_file(&tmp);
-            return Err(e.into());
-        }
+        // The generation is the file's modification time, stamped before the
+        // rename makes the object visible.
+        let stamp = UNIX_EPOCH + Duration::from_nanos(generation);
+        fsio::write_atomic_with(&path, &[body], |f| f.set_modified(stamp))?;
         // Read back what the filesystem recorded: the generation callers will see.
         Ok(generation_of(&path)?.unwrap_or(generation))
     }
@@ -300,7 +278,7 @@ impl ObjectStore for LocalDir {
                 }
                 dir = d.parent();
             }
-            sync_dir(dir.unwrap_or(&self.root));
+            fsio::sync_dir(dir.unwrap_or(&self.root));
             Ok(())
         })())
     }
@@ -360,7 +338,7 @@ fn round_up(v: u64, step: u64) -> u64 {
 fn probe_precision(root: &Path) -> Result<u64> {
     const PROBE_NS: u64 = 1_700_000_000_123_456_789;
     let path = root.join(PROBE_FILE);
-    let f = OpenOptions::new().create(true).truncate(true).write(true).open(&path)?;
+    let f = File::create(&path)?;
     f.set_modified(UNIX_EPOCH + Duration::from_nanos(PROBE_NS))?;
     drop(f);
     let got = mtime_generation(&fs::metadata(&path)?);
@@ -384,17 +362,6 @@ fn probe_precision(root: &Path) -> Result<u64> {
     }
     Ok(2_000_000_000)
 }
-
-#[cfg(unix)]
-fn sync_dir(dir: &Path) {
-    // Best effort: persist the rename itself.
-    if let Ok(d) = File::open(dir) {
-        let _ = d.sync_all();
-    }
-}
-
-#[cfg(not(unix))]
-fn sync_dir(_: &Path) {}
 
 #[cfg(test)]
 mod tests {

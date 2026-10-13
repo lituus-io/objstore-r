@@ -1,5 +1,5 @@
-# Copyright: lituus-io, all rights reserved.
-# Author: terekete <spicyzhug@gmail.com>
+# Author: support@lituus.io
+# Copyright: lituus-io, all rights reserved
 """The Store contract on the memory and local-directory backends."""
 
 import sys
@@ -141,4 +141,4 @@ def test_local_symlinks_cannot_escape(tmp_path):
 
 
 def test_version():
-    assert o.__version__ == "0.1.0"
+    assert o.__version__ == "0.2.0"

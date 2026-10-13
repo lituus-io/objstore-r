@@ -1,5 +1,5 @@
-# Copyright: lituus-io, all rights reserved.
-# Author: terekete <spicyzhug@gmail.com>
+# Author: support@lituus.io
+# Copyright: lituus-io, all rights reserved
 name: Fuzz
 
 on:
@@ -31,9 +31,14 @@ jobs:
       fail-fast: false
       matrix:
         # Every decoder of bytes this crate did not write.
-        target: [fuzz_key, fuzz_gcs_wire]
+        target: [fuzz_key, fuzz_gcs_wire, fuzz_mirror_manifest]
     steps:
       - uses: actions/checkout@v4
+      - name: Fetch the pinned sibling repositories
+        shell: bash
+        env:
+          SIBLING_TOKEN: ${{ secrets.SIBLING_REPO_TOKEN || github.token }}
+        run: scripts/fetch-siblings.sh
       - run: rustup show
       - uses: Swatinem/rust-cache@v2
         with:
