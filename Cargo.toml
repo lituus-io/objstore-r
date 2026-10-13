@@ -38,6 +38,8 @@ mirror = ["graph-r/store", "dep:futures-util"]
 
 [lib]
 name = "objstore_r"
+# Benchmarks live in benches/ (criterion); the library has none of its own.
+bench = false
 
 [package.metadata.docs.rs]
 features = ["gcs", "blocking", "testing", "mirror"]
