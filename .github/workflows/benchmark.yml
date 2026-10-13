@@ -35,7 +35,7 @@ jobs:
       # Advisory on shared runners (noise routinely reaches double digits):
       # the report is uploaded for review; the job fails only if a bench breaks.
       - name: Run benchmarks
-        run: cargo bench --all-features -- --noplot
+        run: cargo bench --all-features --benches -- --noplot
       - name: Upload criterion report
         if: always()
         uses: actions/upload-artifact@v4

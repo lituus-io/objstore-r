@@ -28,9 +28,11 @@ struct SlotWaker {
 
 impl Wake for SlotWaker {
     fn wake(self: Arc<Self>) {
+        // std Wake contract
         self.wake_by_ref();
     }
     fn wake_by_ref(self: &Arc<Self>) {
+        // std Wake contract
         self.ready.store(true, Ordering::Release);
         if let Some(w) =
             self.parent.lock().unwrap_or_else(std::sync::PoisonError::into_inner).as_ref()
@@ -43,7 +45,7 @@ impl Wake for SlotWaker {
 struct Slot<F: Future> {
     fut: Option<Pin<Box<F>>>,
     out: Option<F::Output>,
-    flag: Arc<SlotWaker>,
+    flag: Arc<SlotWaker>, // std Wake contract
     waker: Waker,
 }
 
