@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Author: support@lituus.io
+# Author: spicyzhug@gmail.com
 # Copyright: lituus-io, all rights reserved
 #
 # Run the CI gates locally, in the same order. Needs Docker for the GCS

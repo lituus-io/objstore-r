@@ -1,4 +1,4 @@
-// Author: support@lituus.io
+// Author: spicyzhug@gmail.com
 // Copyright: lituus-io, all rights reserved
 //
 //! CRC-32C (Castagnoli), the checksum Cloud Storage keeps for every object's

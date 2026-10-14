@@ -1,4 +1,4 @@
-# Author: support@lituus.io
+# Author: spicyzhug@gmail.com
 # Copyright: lituus-io, all rights reserved
 """Opt-in content encoding: `put(..., content_encoding="gzip")` on every
 backend. Memory and local-directory stores run directly; GCS runs against a

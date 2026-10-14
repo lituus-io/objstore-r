@@ -1,4 +1,4 @@
-// Author: support@lituus.io
+// Author: spicyzhug@gmail.com
 // Copyright: lituus-io, all rights reserved
 
 use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
