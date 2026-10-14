@@ -72,6 +72,22 @@ pub enum Error {
         #[from]
         source: std::io::Error,
     },
+    // New variants go last: a variant's position is its discriminant.
+    /// A ranged read of an object stored with a content encoding: a byte
+    /// range of an encoded (compressed) stream is meaningless. Read it whole
+    /// with `get`, which decodes it.
+    #[error("ranged read of a {encoding}-encoded object: read it whole")]
+    EncodedRange {
+        /// The object's `Content-Encoding`.
+        encoding: String,
+    },
+    /// A content encoding this build cannot write or decode (an unknown
+    /// token, or `gzip` without feature `gzip`).
+    #[error("unsupported content encoding {encoding:?}")]
+    UnsupportedEncoding {
+        /// The encoding named (at most 64 characters).
+        encoding: String,
+    },
 }
 
 impl Error {

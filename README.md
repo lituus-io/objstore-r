@@ -13,6 +13,7 @@ uu-objstore-r = "0.2"                                      # LocalDir + Mem, no 
 uu-objstore-r = { version = "0.2", features = ["http"] }   # + authorised HTTPS transport
 uu-objstore-r = { version = "0.2", features = ["gcs"] }    # + Google Cloud Storage (implies http)
 uu-objstore-r = { version = "0.2", features = ["mirror"] } # + graph-r store mirroring
+uu-objstore-r = { version = "0.2", features = ["gzip"] }   # + per-object Content-Encoding: gzip
 ```
 
 ```rust
@@ -38,6 +39,8 @@ assert!(s.put("HEAD", Bytes::from_static(b"v3"), Cond::IfGeneration(g1)).await.i
 | `put(key, body, cond)` | new generation | `Cond::None`, `CreateOnly`, `IfGeneration(g)` |
 | `list(prefix)` | `Vec<Meta>` sorted by key | `"dir/"` lists under a directory, `"dir"` also matches `dir…` |
 | `delete(key)` | `()` | idempotent |
+| `put_encoded(key, body, cond, enc)` | new generation | stored compressed (feature `gzip`); `get` decodes, `get_range` is `EncodedRange` |
+| `stat(key)` / `list_stat(prefix)` | `Stat{meta, content_encoding}` | `head` / `list` plus the encoding |
 
 Futures are named associated types (GAT + TAIT), never boxed; the trait has no
 `Send` bound, and a backend's futures are `Send` whenever its state is, so both
@@ -74,6 +77,22 @@ percent-encoding for URLs. Anything else is `Error::InvalidKey` before any I/O.
   conflict. Responses are size-capped, redirects are refused, and plain `http`
   is accepted only for a loopback emulator endpoint.
 
+### Content encoding (feature `gzip`)
+
+Opt in per object: `put_encoded(key, body, cond, ContentEncoding::Gzip)`
+stores the body compressed and records the encoding — on GCS as the object's
+`contentEncoding` (the `contentEncoding` upload parameter), on `LocalDir` in a
+sidecar tree no key can name, in `Mem` beside the bytes. `get` decodes once
+into the returned `Bytes`, which is shared by reference count from there.
+On GCS every read asks for the stored bytes (`Accept-Encoding: gzip`, so the
+server never transcodes) and checks them against the object's CRC-32C
+*before* decoding. A ranged read of an encoded object is refused
+(`Error::EncodedRange`): a byte range of a gzip stream means nothing. Decoding
+stops at `MAX_INFLATED_BYTES` (1 GiB; per store with `with_max_inflated`), so
+a small object cannot inflate without bound (`Error::TooLarge`); a damaged or
+truncated stream is `Error::Corrupt`. Plain writes are unchanged, byte for
+byte. Encode only objects that are read whole.
+
 ### Fenced publishing and graph-r mirroring
 
 `fenced` is the single-writer publish protocol every snapshot publisher
@@ -82,7 +101,9 @@ compare-and-swap (a lost response is recognised by reading back; a racing
 writer gets `Error::Fenced`), and verified fetches. Feature `mirror` builds
 graph-r store mirroring on it (`mirror::Mirror`): byte-identical base and
 log files, incremental log shipping, leases, replicas refreshed with one
-metadata request when nothing changed.
+metadata request when nothing changed. `Mirror::encode_bases(Gzip)` stores
+each immutable base compressed (log segments and `HEAD` stay plain); replicas
+decode it once into the file graph-r maps, and need no setting.
 
 ### Other Google APIs (feature `http`)
 

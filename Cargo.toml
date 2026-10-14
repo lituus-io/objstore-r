@@ -3,7 +3,7 @@
 
 [package]
 name = "uu-objstore-r"
-version = "0.2.2"
+version = "0.2.3"
 edition = "2021"
 rust-version = "1.89" # std File::lock (the pinned nightly is newer)
 license = "AGPL-3.0-or-later"
@@ -35,6 +35,10 @@ testing = []
 # Sync a graph-r store directory with an object store: byte-identical files,
 # fenced single writer, incremental log shipping (`mirror` module).
 mirror = ["graph-r/store", "dep:futures-util"]
+# Per-object `Content-Encoding: gzip` (`ObjectStore::put_encoded`): bodies
+# compressed on write and decoded once on read, on every backend. Without it
+# an encoded write or read is `Error::UnsupportedEncoding`.
+gzip = ["dep:flate2"]
 
 [lib]
 name = "objstore_r"
@@ -42,7 +46,7 @@ name = "objstore_r"
 bench = false
 
 [package.metadata.docs.rs]
-features = ["gcs", "blocking", "testing", "mirror"]
+features = ["gcs", "blocking", "testing", "mirror", "gzip"]
 
 [dependencies]
 # The shared core: atomic files, locks, the clock, xxh3 (no store, no mmap).
@@ -55,6 +59,9 @@ thiserror = "1.0"
 reqwest = { version = "0.12", optional = true, default-features = false, features = ["rustls-tls", "http2"] }
 serde = { version = "1.0", optional = true, features = ["derive"] }
 serde_json = { version = "1.0", optional = true }
+# gzip for opt-in content-encoding (feature `gzip`): the pure-Rust miniz_oxide
+# backend, so no C toolchain or system zlib is needed on any platform.
+flate2 = { version = "1.1", optional = true }
 # Backoff sleeps only (reqwest already requires a tokio reactor).
 tokio = { version = "1.40", optional = true, default-features = false, features = ["time"] }
 
@@ -68,6 +75,11 @@ tokio = { version = "1.40", features = ["rt", "macros", "time", "net", "io-util"
 [[bench]]
 name = "objstore_bench"
 harness = false
+
+[[bench]]
+name = "encoding_bench"
+harness = false
+required-features = ["gzip", "mirror"]
 
 [[test]]
 name = "conformance"
@@ -104,3 +116,7 @@ name = "mirror_bench"
 harness = false
 required-features = ["mirror"]
 
+
+[[test]]
+name = "encoding"
+required-features = ["gzip", "testing"]

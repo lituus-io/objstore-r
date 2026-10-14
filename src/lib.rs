@@ -36,6 +36,15 @@
 //!   written once and shared by reference count from there on.
 //! - **No unsafe code.**
 //!
+//! ## Content encoding
+//!
+//! Opt in per object with [`ObjectStore::put_encoded`] (feature `gzip`): the
+//! body is stored compressed and [`get`](ObjectStore::get) decodes it once
+//! into the returned buffer, bounded against decompression bombs; a ranged
+//! read of an encoded object is refused ([`Error::EncodedRange`]).
+//! [`ObjectStore::stat`] and [`ObjectStore::list_stat`] report the encoding.
+//! See [`encoding`].
+//!
 //! ## Example
 //!
 //! ```
@@ -66,6 +75,7 @@
     clippy::cast_possible_truncation
 )]
 
+pub mod encoding;
 pub mod error;
 pub mod fenced;
 pub mod join;
@@ -92,6 +102,7 @@ use std::future::Future;
 use std::ops::Range;
 
 pub use bytes::Bytes;
+pub use encoding::{ContentEncoding, MAX_INFLATED_BYTES};
 pub use error::{Error, Result};
 pub use key::Key;
 pub use local::LocalDir;
@@ -118,6 +129,17 @@ pub struct Meta {
     pub size: u64,
     /// Current generation (never zero).
     pub generation: u64,
+}
+
+/// [`Meta`] and the object's content encoding, from [`ObjectStore::stat`]
+/// and [`ObjectStore::list_stat`].
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+pub struct Stat {
+    /// Key, generation, and the **stored** size (for an encoded object, the
+    /// encoded bytes).
+    pub meta: Meta,
+    /// How the stored bytes are encoded (`None`: as written).
+    pub content_encoding: Option<ContentEncoding>,
 }
 
 /// A write precondition.
@@ -187,6 +209,42 @@ pub trait ObjectStore {
 
     /// Remove the object. Deleting a missing key succeeds.
     fn delete<'a>(&'a self, key: &'a str) -> Self::Delete<'a>;
+
+    /// Like [`put`](ObjectStore::put), storing `body` compressed with
+    /// `encoding` and recording the encoding, so [`get`](ObjectStore::get)
+    /// returns `body` again and [`get_range`](ObjectStore::get_range) refuses
+    /// with [`Error::EncodedRange`]. Conditions behave exactly as for `put`.
+    ///
+    /// Every backend in this crate implements it (feature `gzip`). The
+    /// default, for stores that cannot record an encoding, refuses with
+    /// [`Error::UnsupportedEncoding`] and writes nothing.
+    fn put_encoded<'a>(
+        &'a self,
+        key: &'a str,
+        body: Bytes,
+        cond: Cond,
+        encoding: ContentEncoding,
+    ) -> impl Future<Output = Result<u64>> + 'a {
+        let _ = (key, body, cond);
+        std::future::ready(Err(Error::UnsupportedEncoding { encoding: encoding.as_str().into() }))
+    }
+
+    /// [`head`](ObjectStore::head) plus the content encoding. The default
+    /// reports none, which is exact for a store that cannot record one.
+    fn stat<'a>(&'a self, key: &'a str) -> impl Future<Output = Result<Option<Stat>>> + 'a {
+        let head = self.head(key);
+        async move { Ok(head.await?.map(|meta| Stat { meta, content_encoding: None })) }
+    }
+
+    /// [`list`](ObjectStore::list) plus each object's content encoding. The
+    /// default reports none, which is exact for a store that cannot record
+    /// one.
+    fn list_stat<'a>(&'a self, prefix: &'a str) -> impl Future<Output = Result<Vec<Stat>>> + 'a {
+        let list = self.list(prefix);
+        async move {
+            Ok(list.await?.into_iter().map(|meta| Stat { meta, content_encoding: None }).collect())
+        }
+    }
 }
 
 /// Clip `range` to an object of `len` bytes, as `get_range` specifies.

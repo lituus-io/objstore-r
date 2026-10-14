@@ -125,7 +125,7 @@ jobs:
       - name: Each feature combination
         run: |
           set -euo pipefail
-          for f in "" "gcs" "testing" "gcs,testing" "mirror" "mirror,gcs,testing"; do
+          for f in "" "gcs" "testing" "gcs,testing" "mirror" "mirror,gcs,testing" "gzip" "gzip,testing" "gzip,gcs"; do
             echo "::group::features=${f:-none}"
             if [ -z "$f" ]; then
               cargo check --no-default-features --all-targets

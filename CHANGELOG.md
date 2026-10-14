@@ -1,5 +1,33 @@
 # Changelog
 
+## 0.2.3
+
+- Opt-in content encoding (feature `gzip`, flate2 on the pure-Rust
+  miniz_oxide backend): `ObjectStore::put_encoded` stores a body
+  gzip-compressed and records the encoding — on GCS as the object's
+  `contentEncoding`, on `LocalDir` in a sidecar tree no key can name, in `Mem`
+  beside the bytes. `get` decodes once into the returned `Bytes`; plain writes
+  are byte-for-byte unchanged.
+- GCS reads ask for the stored bytes (`Accept-Encoding: gzip`, only in a build
+  that can decode them), verify them against the object's CRC-32C from
+  `x-goog-hash` before decoding, then inflate them once.
+- `get_range` of an encoded object is `Error::EncodedRange`, never compressed
+  bytes. An unknown encoding is `Error::UnsupportedEncoding`.
+- Decompression bombs: decoding stops at `MAX_INFLATED_BYTES` (1 GiB),
+  adjustable per store with `with_max_inflated` (`Error::TooLarge`); a
+  truncated or damaged stream is `Error::Corrupt`.
+- `ObjectStore::stat` / `list_stat` return `Stat { meta, content_encoding }`;
+  defaulted trait methods, so other implementations keep compiling.
+- `mirror`: `Mirror::encode_bases` publishes immutable bases compressed; log
+  segments and `HEAD` stay plain, and replicas need no setting. A realistic
+  5,000-page store published 19.4% of the bytes.
+- `fenced::put_immutable_encoded`.
+- Python: `put(..., content_encoding="gzip")`, `Meta.content_encoding`,
+  `EncodedRangeError`, `UnsupportedEncodingError`, `MAX_INFLATED_BYTES`, and a
+  `max_inflated=` keyword on `Store.memory`, `Store.local` and `Store.gcs`.
+- New fuzz target `fuzz_encoding`; the GCS wire fuzz target also covers the
+  encoding fields and `x-goog-hash`.
+
 ## 0.2.2
 
 - Release: the semver check compares against the published crate on

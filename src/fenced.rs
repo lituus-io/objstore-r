@@ -14,7 +14,7 @@
 //! [`Error::Fenced`]. Records and objects are checked with xxh3, the one
 //! hash family of the stack.
 
-use crate::{Bytes, Cond, Error, Key, ObjectStore, Result};
+use crate::{Bytes, Cond, ContentEncoding, Error, Key, ObjectStore, Result};
 use graph_r::hash::xxh3_64;
 
 /// Normalize a publish prefix: empty, or `p/` (a trailing `/` implied),
@@ -50,6 +50,27 @@ pub async fn cas<O: ObjectStore>(o: &O, key: &str, prev: Option<u64>, body: Byte
 pub async fn put_immutable<O: ObjectStore>(o: &O, key: &str, body: Bytes) -> Result<()> {
     let sum = xxh3_64(&body);
     match o.put(key, body, Cond::CreateOnly).await {
+        Ok(_) => Ok(()),
+        Err(Error::Conflict) => match o.get(key).await? {
+            Some(obj) if xxh3_64(&obj.bytes) == sum => Ok(()),
+            _ => Err(Error::Fenced { reason: "an immutable object already holds other bytes" }),
+        },
+        Err(e) => Err(e),
+    }
+}
+
+/// [`put_immutable`], stored with a content encoding
+/// ([`ObjectStore::put_encoded`]). For objects that are only ever read
+/// whole; the retry check compares the decoded bytes, so a retried publish is
+/// recognised whatever the stored bytes are.
+pub async fn put_immutable_encoded<O: ObjectStore>(
+    o: &O,
+    key: &str,
+    body: Bytes,
+    encoding: ContentEncoding,
+) -> Result<()> {
+    let sum = xxh3_64(&body);
+    match o.put_encoded(key, body, Cond::CreateOnly, encoding).await {
         Ok(_) => Ok(()),
         Err(Error::Conflict) => match o.get(key).await? {
             Some(obj) if xxh3_64(&obj.bytes) == sum => Ok(()),
