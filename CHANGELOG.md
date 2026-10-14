@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.2.1
+
+- Security: every lockfile (crate, Python binding, fuzz) refreshed to
+  patched releases, among them rustls 0.23.46 (RUSTSEC-2026-0346, -0347,
+  -0348, -0349) and the earlier rustls and quinn-proto fixes
+  (RUSTSEC-2026-0285, -0338 to -0342). The PyPI wheels are built from these.
+- The Security workflow audits all three lockfiles, not only the crate's.
+- Builds against uu-graph-r 0.4.1.
+
 ## 0.2.0
 
 - Published as **uu-objstore-r** on crates.io (the library is still
