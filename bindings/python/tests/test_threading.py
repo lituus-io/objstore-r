@@ -1,4 +1,4 @@
-# Author: support@lituus.io
+# Author: spicyzhug@gmail.com
 # Copyright: lituus-io, all rights reserved
 """Concurrency: compare-and-swap counters from many threads never lose an
 update, and calls release the GIL."""

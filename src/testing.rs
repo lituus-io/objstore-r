@@ -1,4 +1,4 @@
-// Author: support@lituus.io
+// Author: spicyzhug@gmail.com
 // Copyright: lituus-io, all rights reserved
 //
 //! A conformance suite for [`ObjectStore`] implementations, and the harness
@@ -174,6 +174,138 @@ pub async fn conformance<S: ObjectStore>(s: &S, prefix: &str) -> Result<(), Stri
         "cleanup left objects behind"
     );
     Ok(())
+}
+
+/// The content-encoding contract ([`ObjectStore::put_encoded`]) under
+/// `prefix`, for stores that support `gzip` (every backend here, with feature
+/// `gzip`): encoded and plain objects round-trip, `stat`/`list_stat` report
+/// the encoding, ranged reads of encoded objects refuse, conditions behave as
+/// for `put`, and plain ⇄ encoded rewrites of one key read correctly.
+#[allow(clippy::too_many_lines)] // one linear script, like `conformance`
+pub async fn conformance_encoded<S: ObjectStore>(s: &S, prefix: &str) -> Result<(), String> {
+    use crate::ContentEncoding::Gzip;
+    macro_rules! ensure {
+        ($c:expr, $($t:tt)*) => { if !$c { return Err(format!($($t)*)); } };
+    }
+    let k = |name: &str| format!("{prefix}/{name}");
+    let e = |r: Error| format!("unexpected error: {r}");
+    let text: Bytes = b"a line of text that compresses, ".repeat(4096).into();
+
+    // Round trip, and what is stored is smaller.
+    let g1 = s.put_encoded(&k("enc"), text.clone(), Cond::CreateOnly, Gzip).await.map_err(e)?;
+    let got = s.get(&k("enc")).await.map_err(e)?.ok_or("encoded object vanished")?;
+    ensure!(got.bytes == text && got.generation == g1, "get must decode to the bytes written");
+    let st = s.stat(&k("enc")).await.map_err(e)?.ok_or("stat of an encoded object")?;
+    ensure!(st.content_encoding == Some(Gzip), "stat must report gzip, got {st:?}");
+    ensure!(
+        st.meta.generation == g1 && st.meta.size < text.len() as u64 / 4,
+        "stat reports the generation and the stored (compressed) size: {st:?}"
+    );
+    let head = s.head(&k("enc")).await.map_err(e)?.ok_or("head of an encoded object")?;
+    ensure!(head == st.meta, "head and stat agree: {head:?} vs {st:?}");
+
+    // Ranges refuse, whatever the range; a missing key is still NotFound.
+    for r in [0..4, 0..u64::MAX, 3..3, 1_000_000..1_000_010] {
+        ensure!(
+            matches!(s.get_range(&k("enc"), r.clone()).await, Err(Error::EncodedRange { .. })),
+            "a range {r:?} of an encoded object must be EncodedRange"
+        );
+    }
+
+    // Plain objects beside it are unchanged.
+    s.put(&k("plain"), Bytes::from_static(b"0123456789"), Cond::CreateOnly).await.map_err(e)?;
+    ensure!(
+        s.get_range(&k("plain"), 2..5).await.map_err(e)? == b"234"[..],
+        "plain ranges are unchanged"
+    );
+    let pst = s.stat(&k("plain")).await.map_err(e)?.ok_or("stat of a plain object")?;
+    ensure!(pst.content_encoding.is_none() && pst.meta.size == 10, "plain stat: {pst:?}");
+
+    // Conditions are exactly put's. (Different bytes: a store may recognise
+    // its own earlier write, identical bytes, as a lost response.)
+    let other: Bytes = b"other text that also compresses, ".repeat(512).into();
+    ensure!(
+        matches!(
+            s.put_encoded(&k("enc"), other.clone(), Cond::CreateOnly, Gzip).await,
+            Err(Error::Conflict)
+        ),
+        "create-only over an encoded object must be Conflict"
+    );
+    ensure!(
+        matches!(
+            s.put_encoded(&k("enc"), other.clone(), Cond::IfGeneration(g1 + 1), Gzip).await,
+            Err(Error::PreconditionFailed)
+        ),
+        "a stale generation must fail the precondition"
+    );
+    ensure!(
+        matches!(
+            s.put_encoded(&k("none"), other.clone(), Cond::IfGeneration(g1), Gzip).await,
+            Err(Error::PreconditionFailed)
+        ),
+        "IfGeneration on a missing key must fail"
+    );
+
+    // Encoded -> plain -> encoded on one key, each read as written.
+    let g2 = s.put(&k("enc"), Bytes::from_static(b"now plain"), Cond::IfGeneration(g1)).await;
+    let g2 = g2.map_err(e)?;
+    ensure!(g2 != g1, "a rewrite changes the generation");
+    ensure!(
+        s.get(&k("enc")).await.map_err(e)?.is_some_and(|o| o.bytes == b"now plain"[..]),
+        "a plain rewrite of an encoded key reads plain"
+    );
+    ensure!(
+        s.get_range(&k("enc"), 0..3).await.map_err(e)? == b"now"[..],
+        "and its ranges work again"
+    );
+    let small: Bytes = Bytes::from_static(b"tiny");
+    let g3 = s.put_encoded(&k("enc"), small.clone(), Cond::IfGeneration(g2), Gzip).await;
+    let g3 = g3.map_err(e)?;
+    ensure!(
+        s.get(&k("enc")).await.map_err(e)?.is_some_and(|o| o.bytes == small && o.generation == g3),
+        "an encoded rewrite of a plain key decodes"
+    );
+    let empty = s.put_encoded(&k("empty"), Bytes::new(), Cond::None, Gzip).await.map_err(e)?;
+    ensure!(
+        s.get(&k("empty"))
+            .await
+            .map_err(e)?
+            .is_some_and(|o| o.bytes.is_empty() && o.generation == empty),
+        "an encoded empty body round-trips"
+    );
+
+    // Listing reports each object's encoding, sorted.
+    let listed = s.list_stat(&format!("{prefix}/")).await.map_err(e)?;
+    let seen: Vec<(String, Option<crate::ContentEncoding>)> =
+        listed.iter().map(|st| (st.meta.key.clone(), st.content_encoding)).collect();
+    ensure!(
+        seen == [(k("empty"), Some(Gzip)), (k("enc"), Some(Gzip)), (k("plain"), None)],
+        "list_stat returned {seen:?}"
+    );
+    let plain_list: Vec<_> = s.list(&format!("{prefix}/")).await.map_err(e)?;
+    ensure!(
+        plain_list == listed.iter().map(|st| st.meta.clone()).collect::<Vec<_>>(),
+        "list and list_stat agree"
+    );
+
+    // Invalid keys never reach storage.
+    ensure!(
+        matches!(
+            s.put_encoded("../x", Bytes::new(), Cond::None, Gzip).await,
+            Err(Error::InvalidKey { .. })
+        ),
+        "an invalid key is refused before encoding"
+    );
+
+    // Delete removes the encoding with the object.
+    s.delete(&k("enc")).await.map_err(e)?;
+    ensure!(s.stat(&k("enc")).await.map_err(e)?.is_none(), "deleted objects have no stat");
+    s.put(&k("enc"), Bytes::from_static(b"fresh"), Cond::CreateOnly).await.map_err(e)?;
+    ensure!(
+        s.stat(&k("enc")).await.map_err(e)?.is_some_and(|st| st.content_encoding.is_none()),
+        "a key recreated plain carries no stale encoding"
+    );
+    clean(s, prefix).await
 }
 
 /// A unique key prefix for one test run: `tag-pid-nanos`.

@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Author: support@lituus.io
+# Author: spicyzhug@gmail.com
 # Copyright: lituus-io, all rights reserved
 #
 # Run the CI gates locally, in the same order. Needs Docker for the GCS
@@ -22,7 +22,7 @@ have() { command -v "$1" >/dev/null 2>&1 || cargo "$1" --version >/dev/null 2>&1
 step fmt;    cargo fmt --check
 step clippy; cargo clippy --all-features --all-targets; cargo clippy --no-default-features --all-targets
 step "feature matrix"
-for f in "" gcs testing gcs,testing; do
+for f in "" gcs testing gcs,testing gzip gzip,testing gzip,gcs; do
   if [ -z "$f" ]; then cargo check -q --no-default-features --all-targets; else cargo check -q --no-default-features --features "$f" --all-targets; fi
 done
 if cargo tree --no-default-features -e normal | grep -qE "reqwest|hyper|rustls"; then echo "HTTP stack leaked into default features"; exit 1; fi
@@ -60,7 +60,7 @@ if grep -rnE --include='*.rs' '\bdyn\b|\bArc<|Box<dyn' src/ tests/ benches/ | gr
 
 step "fuzz (${FUZZ_SECS}s per target)"
 if have fuzz; then
-  for t in fuzz_key fuzz_gcs_wire; do (cd fuzz && cargo fuzz run "$t" -- -max_total_time="$FUZZ_SECS" 2>&1 | tail -1); done
+  for t in fuzz_key fuzz_gcs_wire fuzz_encoding; do (cd fuzz && cargo fuzz run "$t" -- -max_total_time="$FUZZ_SECS" 2>&1 | tail -1); done
 else warn "cargo-fuzz not installed"; fi
 
 step "all gates passed"

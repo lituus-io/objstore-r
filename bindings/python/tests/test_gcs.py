@@ -1,4 +1,4 @@
-# Author: support@lituus.io
+# Author: spicyzhug@gmail.com
 # Copyright: lituus-io, all rights reserved
 """Google Cloud Storage: fake-gcs-server (OBJSTORE_FAKE_GCS) and a real
 bucket via Application Default Credentials (OBJSTORE_LIVE_BUCKET). Each is

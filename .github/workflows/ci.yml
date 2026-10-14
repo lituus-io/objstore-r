@@ -1,4 +1,4 @@
-# Author: support@lituus.io
+# Author: spicyzhug@gmail.com
 # Copyright: lituus-io, all rights reserved
 name: CI
 
@@ -125,7 +125,7 @@ jobs:
       - name: Each feature combination
         run: |
           set -euo pipefail
-          for f in "" "gcs" "testing" "gcs,testing" "mirror" "mirror,gcs,testing"; do
+          for f in "" "gcs" "testing" "gcs,testing" "mirror" "mirror,gcs,testing" "gzip" "gzip,testing" "gzip,gcs"; do
             echo "::group::features=${f:-none}"
             if [ -z "$f" ]; then
               cargo check --no-default-features --all-targets

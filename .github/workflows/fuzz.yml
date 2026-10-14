@@ -1,4 +1,4 @@
-# Author: support@lituus.io
+# Author: spicyzhug@gmail.com
 # Copyright: lituus-io, all rights reserved
 name: Fuzz
 
@@ -31,7 +31,7 @@ jobs:
       fail-fast: false
       matrix:
         # Every decoder of bytes this crate did not write.
-        target: [fuzz_key, fuzz_gcs_wire, fuzz_mirror_manifest]
+        target: [fuzz_key, fuzz_gcs_wire, fuzz_mirror_manifest, fuzz_encoding]
     steps:
       - uses: actions/checkout@v4
       - name: Fetch the pinned sibling repositories

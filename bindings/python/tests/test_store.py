@@ -1,4 +1,4 @@
-# Author: support@lituus.io
+# Author: spicyzhug@gmail.com
 # Copyright: lituus-io, all rights reserved
 """The Store contract on the memory and local-directory backends."""
 
@@ -141,4 +141,4 @@ def test_local_symlinks_cannot_escape(tmp_path):
 
 
 def test_version():
-    assert o.__version__ == "0.2.2"
+    assert o.__version__ == "0.2.3"

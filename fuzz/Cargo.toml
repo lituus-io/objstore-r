@@ -1,4 +1,4 @@
-# Author: support@lituus.io
+# Author: spicyzhug@gmail.com
 # Copyright: lituus-io, all rights reserved
 
 [package]
@@ -12,7 +12,7 @@ cargo-fuzz = true
 
 [dependencies]
 libfuzzer-sys = "0.4"
-objstore-r = { package = "uu-objstore-r", path = "..", features = ["gcs", "mirror"] }
+objstore-r = { package = "uu-objstore-r", path = "..", features = ["gcs", "mirror", "gzip"] }
 
 [[bin]]
 name = "fuzz_key"
@@ -31,6 +31,13 @@ bench = false
 [[bin]]
 name = "fuzz_mirror_manifest"
 path = "fuzz_targets/fuzz_mirror_manifest.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_encoding"
+path = "fuzz_targets/fuzz_encoding.rs"
 test = false
 doc = false
 bench = false

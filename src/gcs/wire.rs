@@ -1,9 +1,9 @@
-// Author: support@lituus.io
+// Author: spicyzhug@gmail.com
 // Copyright: lituus-io, all rights reserved
 //
 //! JSON API response parsing (a small, fuzzed surface).
 
-use crate::{Error, Meta, Result};
+use crate::{ContentEncoding, Error, Meta, Result, Stat};
 
 #[derive(serde::Deserialize)]
 struct ObjMeta {
@@ -11,6 +11,8 @@ struct ObjMeta {
     #[serde(default)]
     size: Option<NumStr>,
     generation: NumStr,
+    #[serde(rename = "contentEncoding", default)]
+    content_encoding: Option<String>,
 }
 
 /// The JSON API sends 64-bit numbers as strings; emulators sometimes as numbers.
@@ -48,11 +50,26 @@ fn to_meta(m: ObjMeta) -> Result<Meta> {
     Ok(Meta { key: m.name, size, generation })
 }
 
+fn to_stat(mut m: ObjMeta) -> Result<Stat> {
+    let content_encoding = match m.content_encoding.take() {
+        Some(t) => ContentEncoding::parse(&t)?,
+        None => None,
+    };
+    Ok(Stat { meta: to_meta(m)?, content_encoding })
+}
+
 /// An object resource.
 pub(crate) fn parse_meta(body: &[u8]) -> Result<Meta> {
     let m: ObjMeta =
         serde_json::from_slice(body).map_err(|_| Error::protocol("malformed object resource"))?;
     to_meta(m)
+}
+
+/// An object resource with its `contentEncoding`.
+pub(crate) fn parse_stat(body: &[u8]) -> Result<Stat> {
+    let m: ObjMeta =
+        serde_json::from_slice(body).map_err(|_| Error::protocol("malformed object resource"))?;
+    to_stat(m)
 }
 
 /// One page of a listing.
@@ -63,11 +80,22 @@ pub(crate) fn parse_list(body: &[u8]) -> Result<(Vec<Meta>, Option<String>)> {
     Ok((items, p.next_page_token))
 }
 
+/// One page of a listing, with each object's `contentEncoding`.
+pub(crate) fn parse_list_stat(body: &[u8]) -> Result<(Vec<Stat>, Option<String>)> {
+    let p: ListPage =
+        serde_json::from_slice(body).map_err(|_| Error::protocol("malformed listing"))?;
+    let items = p.items.into_iter().map(to_stat).collect::<Result<Vec<_>>>()?;
+    Ok((items, p.next_page_token))
+}
+
 /// Fuzzing entry point: parse anything, never panic.
 #[doc(hidden)]
 pub fn fuzz(body: &[u8]) {
     let _ = parse_meta(body);
     let _ = parse_list(body);
+    let _ = parse_stat(body);
+    let _ = parse_list_stat(body);
+    let _ = super::crc32c::from_goog_hash(std::str::from_utf8(body).ok());
 }
 
 #[cfg(test)]
@@ -88,6 +116,22 @@ mod tests {
         assert_eq!((items.len(), next.as_deref()), (1, Some("t")));
         let (items, next) = parse_list(b"{}").unwrap();
         assert!(items.is_empty() && next.is_none());
+        let s = parse_stat(br#"{"name":"a","size":"9","generation":"3","contentEncoding":"gzip"}"#)
+            .unwrap();
+        assert_eq!(s.content_encoding, Some(ContentEncoding::Gzip));
+        let s = parse_stat(br#"{"name":"a","generation":"3"}"#).unwrap();
+        assert_eq!((s.content_encoding, s.meta.size), (None, 0));
+        let (items, _) = parse_list_stat(
+            br#"{"items":[{"name":"a","generation":"2","contentEncoding":"identity"},
+                          {"name":"b","generation":"4","contentEncoding":"gzip"}]}"#,
+        )
+        .unwrap();
+        assert_eq!(items[0].content_encoding, None);
+        assert_eq!(items[1].content_encoding, Some(ContentEncoding::Gzip));
+        assert!(matches!(
+            parse_stat(br#"{"name":"a","generation":"3","contentEncoding":"br"}"#),
+            Err(Error::UnsupportedEncoding { .. })
+        ));
         for bad in [
             &b""[..],
             b"null",

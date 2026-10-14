@@ -1,4 +1,4 @@
-// Author: support@lituus.io
+// Author: spicyzhug@gmail.com
 // Copyright: lituus-io, all rights reserved
 //
 //! Python bindings for `objstore-r` (PyO3 + maturin): `pip install
@@ -13,6 +13,9 @@
 //!   backend produced, and a `Blob` passed back to `put` is not copied.
 //! - GCS requests run on a small private runtime; memory and local-directory
 //!   operations complete synchronously without one.
+//! - `put(..., content_encoding="gzip")` stores an object compressed; `get`
+//!   decodes it once, in Rust, into the buffer the `Blob` then shares, so the
+//!   zero-copy view is of the original bytes.
 //!
 //! The only `unsafe` is the buffer export (`__getbuffer__`), documented at
 //! the call.
@@ -20,7 +23,10 @@
 #![deny(unsafe_op_in_unsafe_fn)]
 
 use objstore::token::{Adc, Static};
-use objstore::{Bytes, Cond, Gcs, GcsConfig, LocalDir, Mem, Meta, ObjectStore};
+use objstore::{
+    Bytes, Cond, ContentEncoding, Gcs, GcsConfig, LocalDir, Mem, ObjectStore, Stat,
+    MAX_INFLATED_BYTES,
+};
 use pyo3::buffer::PyBuffer;
 use pyo3::create_exception;
 use pyo3::exceptions::{PyBufferError, PyException, PyValueError};
@@ -54,6 +60,18 @@ create_exception!(
     "The object exceeds the configured size limit."
 );
 create_exception!(objstore_r, ProtocolError, ObjstoreError, "The store answered unexpectedly.");
+create_exception!(
+    objstore_r,
+    EncodedRangeError,
+    ObjstoreError,
+    "A ranged read of an object stored with a content encoding: read it whole with `get`."
+);
+create_exception!(
+    objstore_r,
+    UnsupportedEncodingError,
+    ObjstoreError,
+    "An object is stored with a content encoding this build cannot decode."
+);
 
 fn map_err(e: objstore::Error) -> PyErr {
     use objstore::Error as E;
@@ -67,6 +85,8 @@ fn map_err(e: objstore::Error) -> PyErr {
         E::Auth { .. } => AuthError::new_err(msg),
         E::TooLarge { .. } => TooLargeError::new_err(msg),
         E::Protocol { .. } => ProtocolError::new_err(msg),
+        E::EncodedRange { .. } => EncodedRangeError::new_err(msg),
+        E::UnsupportedEncoding { .. } => UnsupportedEncodingError::new_err(msg),
         _ => ObjstoreError::new_err(msg),
     }
 }
@@ -171,18 +191,35 @@ struct PyMeta {
     /// Current generation (never zero; changes on every write).
     #[pyo3(get)]
     generation: u64,
+    /// How the stored bytes are encoded (`"gzip"`), or `None` as written.
+    /// For an encoded object `size` counts the stored, encoded bytes.
+    #[pyo3(get)]
+    content_encoding: Option<&'static str>,
 }
 
 #[pymethods]
 impl PyMeta {
     fn __repr__(&self) -> String {
-        format!("Meta(key={:?}, size={}, generation={})", self.key, self.size, self.generation)
+        let enc = self.content_encoding.map(|e| format!(", content_encoding={e:?}"));
+        format!(
+            "Meta(key={:?}, size={}, generation={}{})",
+            self.key,
+            self.size,
+            self.generation,
+            enc.unwrap_or_default()
+        )
     }
 }
 
-impl From<Meta> for PyMeta {
-    fn from(m: Meta) -> Self {
-        Self { key: m.key, size: m.size, generation: m.generation }
+impl From<Stat> for PyMeta {
+    fn from(s: Stat) -> Self {
+        let m = s.meta;
+        Self {
+            key: m.key,
+            size: m.size,
+            generation: m.generation,
+            content_encoding: s.content_encoding.map(ContentEncoding::as_str),
+        }
     }
 }
 
@@ -240,6 +277,20 @@ fn body(py: Python<'_>, data: &Bound<'_, PyAny>) -> PyResult<Bytes> {
     Ok(Bytes::from(buf.to_vec(py)?))
 }
 
+/// The `content_encoding=` argument: `None`, `"gzip"`, or `"identity"` (the
+/// same as `None`). Anything else is a `ValueError` before any I/O.
+fn encoding(token: Option<&str>) -> PyResult<Option<ContentEncoding>> {
+    match token {
+        None => Ok(None),
+        Some(t) => ContentEncoding::parse(t).map_err(|_| {
+            let shown: String = t.chars().take(64).collect();
+            PyValueError::new_err(format!(
+                "unsupported content_encoding {shown:?}: use None or \"gzip\""
+            ))
+        }),
+    }
+}
+
 fn cond(if_generation: Option<u64>, create_only: bool) -> PyResult<Cond> {
     match (if_generation, create_only) {
         (Some(_), true) => {
@@ -258,18 +309,24 @@ fn cond(if_generation: Option<u64>, create_only: bool) -> PyResult<Cond> {
 impl PyStore {
     /// An in-memory store (tests, caches). Generations increase across the
     /// whole store, like GCS.
+    /// `max_inflated` bounds the decoded size of an encoded object (a
+    /// decompression bomb raises `TooLargeError`), on every backend.
     #[staticmethod]
-    fn memory() -> Self {
-        Self { backend: Backend::Mem(Mem::default()), rt: None, desc: "Store.memory()".into() }
+    #[pyo3(signature = (*, max_inflated=MAX_INFLATED_BYTES))]
+    fn memory(max_inflated: u64) -> Self {
+        let mem = Mem::default().with_max_inflated(max_inflated);
+        Self { backend: Backend::Mem(mem), rt: None, desc: "Store.memory()".into() }
     }
 
     /// A store in a local directory (created if missing). Writes are atomic
     /// (temporary + fsync + rename); compare-and-swap is atomic across threads
     /// and processes on the host; paths never escape the directory.
     #[staticmethod]
-    fn local(py: Python<'_>, root: std::path::PathBuf) -> PyResult<Self> {
+    #[pyo3(signature = (root, *, max_inflated=MAX_INFLATED_BYTES))]
+    fn local(py: Python<'_>, root: std::path::PathBuf, max_inflated: u64) -> PyResult<Self> {
         let desc = format!("Store.local({:?})", root.display().to_string());
         let dir = py.detach(|| LocalDir::open(&root)).map_err(map_err)?;
+        let dir = dir.with_max_inflated(max_inflated);
         Ok(Self { backend: Backend::Local(dir), rt: None, desc })
     }
 
@@ -279,7 +336,7 @@ impl PyStore {
     /// bearer token; `anonymous=True` for an emulator. `endpoint` must be
     /// https except on loopback (e.g. fake-gcs-server).
     #[staticmethod]
-    #[pyo3(signature = (bucket, *, token=None, anonymous=false, endpoint=None, timeout=60.0, max_retries=5, max_object_bytes=4 << 30, resumable_threshold=8 << 20))]
+    #[pyo3(signature = (bucket, *, token=None, anonymous=false, endpoint=None, timeout=60.0, max_retries=5, max_object_bytes=4 << 30, resumable_threshold=8 << 20, max_inflated=MAX_INFLATED_BYTES))]
     #[allow(clippy::too_many_arguments)]
     fn gcs(
         py: Python<'_>,
@@ -291,6 +348,7 @@ impl PyStore {
         max_retries: u32,
         max_object_bytes: u64,
         resumable_threshold: usize,
+        max_inflated: u64,
     ) -> PyResult<Self> {
         if token.is_some() && anonymous {
             return Err(PyValueError::new_err("pass at most one of token and anonymous"));
@@ -324,7 +382,7 @@ impl PyStore {
                     }
                 };
                 let _guard = rt.enter();
-                Gcs::new(bucket, tokens, cfg)
+                Gcs::new(bucket, tokens, cfg).map(|g| g.with_max_inflated(max_inflated))
             })
             .map_err(map_err)?;
         Ok(Self { backend: Backend::Gcs(Box::new(gcs)), rt: Some(rt), desc })
@@ -344,14 +402,16 @@ impl PyStore {
         self.desc.clone()
     }
 
-    /// The object and its generation, or `None` when it does not exist.
+    /// The object and its generation, or `None` when it does not exist. An
+    /// encoded object is decoded once, into the buffer the `Blob` shares.
     fn get(&self, py: Python<'_>, key: &str) -> PyResult<Option<PyBlob>> {
         let got = py.detach(|| on!(self, s => s.get(key))).map_err(map_err)?;
         Ok(got.map(|o| PyBlob { bytes: o.bytes, generation: Some(o.generation) }))
     }
 
     /// Bytes `[start, end)` of an object, clipped to its size (an empty Blob
-    /// past the end). Raises `NotFoundError` for a missing object.
+    /// past the end). Raises `NotFoundError` for a missing object and
+    /// `EncodedRangeError` for an encoded one (read those whole).
     fn get_range(&self, py: Python<'_>, key: &str, start: u64, end: u64) -> PyResult<PyBlob> {
         if end < start {
             return Err(PyValueError::new_err("end must be >= start"));
@@ -375,13 +435,15 @@ impl PyStore {
 
     /// Metadata only, or `None` when the object does not exist.
     fn head(&self, py: Python<'_>, key: &str) -> PyResult<Option<PyMeta>> {
-        Ok(py.detach(|| on!(self, s => s.head(key))).map_err(map_err)?.map(PyMeta::from))
+        Ok(py.detach(|| on!(self, s => s.stat(key))).map_err(map_err)?.map(PyMeta::from))
     }
 
     /// Write an object; returns its new generation. `create_only=True` fails
     /// with `ConflictError` if it exists; `if_generation=g` fails with
     /// `PreconditionFailedError` unless the current generation is `g`.
-    #[pyo3(signature = (key, data, *, if_generation=None, create_only=false))]
+    /// `content_encoding="gzip"` stores the bytes compressed (for objects read
+    /// whole: `get` decodes, `get_range` refuses); `None` stores them as given.
+    #[pyo3(signature = (key, data, *, if_generation=None, create_only=false, content_encoding=None))]
     fn put(
         &self,
         py: Python<'_>,
@@ -389,17 +451,23 @@ impl PyStore {
         data: &Bound<'_, PyAny>,
         if_generation: Option<u64>,
         create_only: bool,
+        content_encoding: Option<&str>,
     ) -> PyResult<u64> {
         let cond = cond(if_generation, create_only)?;
+        let encoding = encoding(content_encoding)?;
         let body = body(py, data)?;
-        py.detach(|| on!(self, s => s.put(key, body.clone(), cond))).map_err(map_err)
+        py.detach(|| match encoding {
+            None => on!(self, s => s.put(key, body.clone(), cond)),
+            Some(e) => on!(self, s => s.put_encoded(key, body.clone(), cond, e)),
+        })
+        .map_err(map_err)
     }
 
     /// Objects whose key starts with `prefix`, sorted by key. `"dir/"` lists
     /// under a directory; `""` lists everything.
     #[pyo3(signature = (prefix=""))]
     fn list(&self, py: Python<'_>, prefix: &str) -> PyResult<Vec<PyMeta>> {
-        let metas = py.detach(|| on!(self, s => s.list(prefix))).map_err(map_err)?;
+        let metas = py.detach(|| on!(self, s => s.list_stat(prefix))).map_err(map_err)?;
         Ok(metas.into_iter().map(PyMeta::from).collect())
     }
 
@@ -455,5 +523,8 @@ fn objstore_r(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add("AuthError", py.get_type::<AuthError>())?;
     m.add("TooLargeError", py.get_type::<TooLargeError>())?;
     m.add("ProtocolError", py.get_type::<ProtocolError>())?;
+    m.add("EncodedRangeError", py.get_type::<EncodedRangeError>())?;
+    m.add("UnsupportedEncodingError", py.get_type::<UnsupportedEncodingError>())?;
+    m.add("MAX_INFLATED_BYTES", MAX_INFLATED_BYTES)?;
     Ok(())
 }

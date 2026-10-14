@@ -1,4 +1,4 @@
-// Author: support@lituus.io
+// Author: spicyzhug@gmail.com
 // Copyright: lituus-io, all rights reserved
 //
 //! # graph-r-mirror
@@ -33,6 +33,13 @@
 //!   state exactly one wins and the other gets [`Error::Fenced`]. An optional
 //!   lease ([`Mirror::acquire_lease`]) says *who* should be writing.
 //!
+//! - **Compressed bases, opt in** ([`Mirror::encode_bases`]): each new
+//!   `graph.base` is published gzip-encoded. Only bases — immutable and
+//!   always read whole. `HEAD` and log segments stay plain: segments are
+//!   appended incrementally and a byte range of a compressed stream is
+//!   meaningless. A pull or refresh decodes the base once, into the file
+//!   graph-r then maps, so reads stay zero-copy; replicas need no setting.
+//!
 //! Futures are unboxed (`impl Future` over borrowed state); no `Arc`, no
 //! `dyn`. The internal `Mutex` is never held across an `.await`.
 
@@ -42,7 +49,7 @@ mod manifest;
 pub use crate::ObjectStore;
 pub use manifest::{Lease, Segment};
 
-use crate::{fenced, Bytes};
+use crate::{fenced, Bytes, ContentEncoding};
 use graph_r::format::{base, wal};
 use graph_r::fsio::now_ms;
 use graph_r::hash::xxh3_64;
@@ -183,6 +190,8 @@ pub struct Mirror<'o, O: ObjectStore> {
     objects: &'o O,
     prefix: String,
     state: Mutex<State>,
+    /// Encoding for published bases (`None`: stored as written).
+    base_encoding: Option<ContentEncoding>,
 }
 
 impl<'o, O: ObjectStore> Mirror<'o, O> {
@@ -190,7 +199,17 @@ impl<'o, O: ObjectStore> Mirror<'o, O> {
     /// a trailing `/` is implied).
     pub fn new(objects: &'o O, prefix: &str) -> Result<Self> {
         let prefix = fenced::prefix(prefix)?;
-        Ok(Self { objects, prefix, state: Mutex::new(State::default()) })
+        Ok(Self { objects, prefix, state: Mutex::new(State::default()), base_encoding: None })
+    }
+
+    /// Publish every new base with `encoding` (feature `gzip`). Bases only:
+    /// `HEAD` and log segments are never encoded. Readers need no setting —
+    /// [`get`](ObjectStore::get) decodes. [`Published::uploaded`] still
+    /// counts the store's bytes, not the smaller stored ones.
+    #[must_use]
+    pub fn encode_bases(mut self, encoding: ContentEncoding) -> Self {
+        self.base_encoding = Some(encoding);
+        self
     }
 
     /// The normalized prefix (empty or ending in `/`).
@@ -496,12 +515,13 @@ impl<'o, O: ObjectStore> Mirror<'o, O> {
                 Cut::Full { generation, base, wal } => {
                     let base_sum = xxh3_64(&base);
                     let base_len = base.len() as u64;
-                    fenced::put_immutable(
-                        self.objects,
-                        &self.base_key(generation),
-                        Bytes::from(base),
-                    )
-                    .await?;
+                    let (key, base) = (self.base_key(generation), Bytes::from(base));
+                    match self.base_encoding {
+                        None => fenced::put_immutable(self.objects, &key, base).await?,
+                        Some(e) => {
+                            fenced::put_immutable_encoded(self.objects, &key, base, e).await?;
+                        }
+                    }
                     let s = Segment { start: 0, len: wal.len() as u64, sum: xxh3_64(&wal) };
                     fenced::put_immutable(
                         self.objects,

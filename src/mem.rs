@@ -1,4 +1,4 @@
-// Author: support@lituus.io
+// Author: spicyzhug@gmail.com
 // Copyright: lituus-io, all rights reserved
 //
 //! An in-memory store with scripted fault injection, for tests.
@@ -7,9 +7,13 @@
 //! order. [`Fault::LostResponse`] applies the operation and then reports it as
 //! failed: the classic ambiguity a real network adds, which crash-consistent
 //! callers must survive.
+//!
+//! Encoded objects ([`ObjectStore::put_encoded`]) keep their encoding beside
+//! the stored bytes and are decoded on `get`, outside the lock.
 
+use crate::encoding::{self, ContentEncoding, MAX_INFLATED_BYTES};
 use crate::key::check_prefix;
-use crate::{clip, Bytes, Cond, Error, Key, Meta, Object, ObjectStore, Result};
+use crate::{clip, Bytes, Cond, Error, Key, Meta, Object, ObjectStore, Result, Stat};
 use std::collections::{BTreeMap, VecDeque};
 use std::future::{ready, Ready};
 use std::ops::Range;
@@ -28,9 +32,22 @@ pub enum Fault {
     LostResponse(Error),
 }
 
+/// The stored bytes and how they are encoded.
+#[derive(Debug, Clone)]
+struct Stored {
+    obj: Object,
+    encoding: Option<ContentEncoding>,
+}
+
+impl Stored {
+    fn meta(&self, key: String) -> Meta {
+        Meta { key, size: self.obj.bytes.len() as u64, generation: self.obj.generation }
+    }
+}
+
 #[derive(Debug, Default)]
 struct Inner {
-    objects: BTreeMap<String, Object>,
+    objects: BTreeMap<String, Stored>,
     next_generation: u64,
     faults: VecDeque<Fault>,
     ops: u64,
@@ -38,12 +55,28 @@ struct Inner {
 
 /// An in-memory [`ObjectStore`]. Generations increase monotonically across
 /// the whole store, like GCS.
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub struct Mem {
     inner: Mutex<Inner>,
+    /// Bound on a decoded body.
+    max_inflated: u64,
+}
+
+impl Default for Mem {
+    fn default() -> Self {
+        Self { inner: Mutex::default(), max_inflated: MAX_INFLATED_BYTES }
+    }
 }
 
 impl Mem {
+    /// Refuse to decode an encoded object past `limit` bytes
+    /// ([`Error::TooLarge`]); the default is [`MAX_INFLATED_BYTES`].
+    #[must_use]
+    pub fn with_max_inflated(mut self, limit: u64) -> Self {
+        self.max_inflated = limit;
+        self
+    }
+
     /// Queue a fault for a future operation (consumed in order, one per call).
     pub fn inject(&self, fault: Fault) {
         self.lock().faults.push_back(fault);
@@ -83,6 +116,31 @@ impl Mem {
         self.inner.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 
+    fn put_stored(
+        &self,
+        key: &str,
+        body: Bytes,
+        cond: Cond,
+        encoding: Option<ContentEncoding>,
+    ) -> Result<u64> {
+        let k = Key::parse(key)?;
+        self.run(|g| {
+            let current = g.objects.get(k.as_str()).map(|o| o.obj.generation);
+            match (cond, current) {
+                (Cond::CreateOnly, Some(_)) => return Err(Error::Conflict),
+                (Cond::IfGeneration(want), cur) if cur != Some(want) => {
+                    return Err(Error::PreconditionFailed)
+                }
+                _ => {}
+            }
+            g.next_generation += 1;
+            let generation = g.next_generation;
+            let obj = Object { bytes: body, generation };
+            g.objects.insert(k.as_str().to_owned(), Stored { obj, encoding });
+            Ok(generation)
+        })
+    }
+
     fn run<T>(&self, op: impl FnOnce(&mut Inner) -> Result<T>) -> Result<T> {
         let mut g = self.lock();
         g.ops += 1;
@@ -106,47 +164,40 @@ impl ObjectStore for Mem {
     type Delete<'a> = Ready<Result<()>>;
 
     fn get<'a>(&'a self, key: &'a str) -> Self::Get<'a> {
-        ready(Key::parse(key).and_then(|k| self.run(|g| Ok(g.objects.get(k.as_str()).cloned()))))
+        let stored =
+            Key::parse(key).and_then(|k| self.run(|g| Ok(g.objects.get(k.as_str()).cloned())));
+        ready(stored.and_then(|s| {
+            s.map(|Stored { obj, encoding }| match encoding {
+                None => Ok(obj),
+                Some(e) => Ok(Object {
+                    bytes: encoding::decode(e, &obj.bytes, self.max_inflated)?,
+                    generation: obj.generation,
+                }),
+            })
+            .transpose()
+        }))
     }
 
     fn get_range<'a>(&'a self, key: &'a str, range: Range<u64>) -> Self::GetRange<'a> {
         ready(Key::parse(key).and_then(|k| {
             self.run(|g| {
                 let o = g.objects.get(k.as_str()).ok_or(Error::NotFound)?;
-                Ok(o.bytes.slice(clip(&range, o.bytes.len() as u64)))
+                if let Some(e) = o.encoding {
+                    return Err(Error::EncodedRange { encoding: e.as_str().into() });
+                }
+                Ok(o.obj.bytes.slice(clip(&range, o.obj.bytes.len() as u64)))
             })
         }))
     }
 
     fn head<'a>(&'a self, key: &'a str) -> Self::Head<'a> {
         ready(Key::parse(key).and_then(|k| {
-            self.run(|g| {
-                Ok(g.objects.get(k.as_str()).map(|o| Meta {
-                    key: k.as_str().to_owned(),
-                    size: o.bytes.len() as u64,
-                    generation: o.generation,
-                }))
-            })
+            self.run(|g| Ok(g.objects.get(k.as_str()).map(|o| o.meta(k.as_str().to_owned()))))
         }))
     }
 
     fn put<'a>(&'a self, key: &'a str, body: Bytes, cond: Cond) -> Self::Put<'a> {
-        ready(Key::parse(key).and_then(|k| {
-            self.run(|g| {
-                let current = g.objects.get(k.as_str()).map(|o| o.generation);
-                match (cond, current) {
-                    (Cond::CreateOnly, Some(_)) => return Err(Error::Conflict),
-                    (Cond::IfGeneration(want), cur) if cur != Some(want) => {
-                        return Err(Error::PreconditionFailed)
-                    }
-                    _ => {}
-                }
-                g.next_generation += 1;
-                let generation = g.next_generation;
-                g.objects.insert(k.as_str().to_owned(), Object { bytes: body, generation });
-                Ok(generation)
-            })
-        }))
+        ready(self.put_stored(key, body, cond, None))
     }
 
     fn list<'a>(&'a self, prefix: &'a str) -> Self::List<'a> {
@@ -155,11 +206,7 @@ impl ObjectStore for Mem {
                 Ok(g.objects
                     .range(prefix.to_owned()..)
                     .take_while(|(k, _)| k.starts_with(prefix))
-                    .map(|(k, o)| Meta {
-                        key: k.clone(),
-                        size: o.bytes.len() as u64,
-                        generation: o.generation,
-                    })
+                    .map(|(k, o)| o.meta(k.clone()))
                     .collect())
             })
         }))
@@ -170,6 +217,49 @@ impl ObjectStore for Mem {
             self.run(|g| {
                 g.objects.remove(k.as_str());
                 Ok(())
+            })
+        }))
+    }
+
+    fn put_encoded<'a>(
+        &'a self,
+        key: &'a str,
+        body: Bytes,
+        cond: Cond,
+        encoding: ContentEncoding,
+    ) -> impl std::future::Future<Output = Result<u64>> + 'a {
+        // Validate before compressing; compress outside the lock.
+        ready(Key::parse(key).and_then(|_| {
+            let stored = encoding::encode(encoding, &body)?;
+            self.put_stored(key, stored, cond, Some(encoding))
+        }))
+    }
+
+    fn stat<'a>(
+        &'a self,
+        key: &'a str,
+    ) -> impl std::future::Future<Output = Result<Option<Stat>>> + 'a {
+        ready(Key::parse(key).and_then(|k| {
+            self.run(|g| {
+                Ok(g.objects.get(k.as_str()).map(|o| Stat {
+                    meta: o.meta(k.as_str().to_owned()),
+                    content_encoding: o.encoding,
+                }))
+            })
+        }))
+    }
+
+    fn list_stat<'a>(
+        &'a self,
+        prefix: &'a str,
+    ) -> impl std::future::Future<Output = Result<Vec<Stat>>> + 'a {
+        ready(check_prefix(prefix).and_then(|()| {
+            self.run(|g| {
+                Ok(g.objects
+                    .range(prefix.to_owned()..)
+                    .take_while(|(k, _)| k.starts_with(prefix))
+                    .map(|(k, o)| Stat { meta: o.meta(k.clone()), content_encoding: o.encoding })
+                    .collect())
             })
         }))
     }

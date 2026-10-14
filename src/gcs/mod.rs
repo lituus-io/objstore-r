@@ -1,4 +1,4 @@
-// Author: support@lituus.io
+// Author: spicyzhug@gmail.com
 // Copyright: lituus-io, all rights reserved
 //
 //! Google Cloud Storage over the JSON API (feature `gcs`).
@@ -17,19 +17,35 @@
 //!   only for a loopback emulator); redirects are refused; response bodies are
 //!   bounded by [`GcsConfig::max_object_bytes`]; error messages never include
 //!   tokens or request bodies.
+//! - **Content encoding** ([`ObjectStore::put_encoded`]): the compressed body
+//!   is uploaded with the `contentEncoding` insert parameter (documented for
+//!   `uploadType=media`, and accepted by the resumable session start).
+//!   Every read sends `Accept-Encoding: gzip`, so Cloud Storage serves the
+//!   stored bytes as they are instead of decompressing them server-side
+//!   (decompressive transcoding, which also ignores `Range`). A body served
+//!   with `Content-Encoding` is checked against the object's CRC-32C from
+//!   `x-goog-hash` — which covers the stored, compressed bytes — *before* it
+//!   is decoded, then inflated once under [`Gcs::with_max_inflated`]'s bound.
+//!   A ranged read of an encoded object is refused from the response headers,
+//!   before any body is read.
 
+mod crc32c;
 mod wire;
 
 #[doc(hidden)]
 pub use wire::fuzz as fuzz_wire;
 
+use crate::encoding::{self, ContentEncoding, MAX_INFLATED_BYTES};
 use crate::key::{check_prefix, encode_component};
 use crate::net::{backoff, is_allowed_endpoint, is_retriable_status, transport_error};
 use crate::token::TokenProvider;
-use crate::{Bytes, Cond, Error, Key, Meta, Object, ObjectStore, Result};
+use crate::{Bytes, Cond, Error, Key, Meta, Object, ObjectStore, Result, Stat};
 use std::future::Future;
 use std::ops::Range;
 use std::time::Duration;
+
+/// One listing page: its items and the next page token.
+type Page<M> = (Vec<M>, Option<String>);
 
 /// Settings.
 #[derive(Debug, Clone)]
@@ -68,6 +84,8 @@ pub struct Gcs<T: TokenProvider> {
     api: String,
     /// `{endpoint}/upload/storage/v1/b/{bucket}`
     upload: String,
+    /// Bound on a decoded body.
+    max_inflated: u64,
 }
 
 impl<T: TokenProvider> Gcs<T> {
@@ -95,7 +113,17 @@ impl<T: TokenProvider> Gcs<T> {
             api: format!("{endpoint}/storage/v1/b/{bucket}"),
             upload: format!("{endpoint}/upload/storage/v1/b/{bucket}"),
             cfg,
+            max_inflated: MAX_INFLATED_BYTES,
         })
+    }
+
+    /// Refuse to decode an encoded object past `limit` bytes
+    /// ([`Error::TooLarge`]); the default is [`MAX_INFLATED_BYTES`]. The
+    /// stored bytes stay bounded by [`GcsConfig::max_object_bytes`].
+    #[must_use]
+    pub fn with_max_inflated(mut self, limit: u64) -> Self {
+        self.max_inflated = limit;
+        self
     }
 
     /// The token provider.
@@ -169,14 +197,39 @@ impl<T: TokenProvider> Gcs<T> {
         }
     }
 
-    async fn get_inner(&self, key: &str) -> Result<Option<Object>> {
-        let url = format!("{}?alt=media", self.object_url(key));
+    async fn stat_inner(&self, key: &str) -> Result<Option<Stat>> {
+        let url = format!("{}?fields=name,size,generation,contentEncoding", self.object_url(key));
         let resp = self.send(|| self.http.get(&url)).await?;
         match resp.status().as_u16() {
             404 => Ok(None),
             200 => {
+                let body = self.body(resp).await?;
+                wire::parse_stat(&body).map(Some)
+            }
+            _ => Err(status_error(resp).await),
+        }
+    }
+
+    async fn get_inner(&self, key: &str) -> Result<Option<Object>> {
+        let url = format!("{}?alt=media", self.object_url(key));
+        let resp = self.send(|| stored_bytes(self.http.get(&url))).await?;
+        match resp.status().as_u16() {
+            404 => Ok(None),
+            200 => {
                 let header_gen = generation_header(&resp);
-                let bytes = self.body(resp).await?;
+                let served = served_encoding(&resp)?;
+                let sum = served.and_then(|_| stored_crc32c(&resp));
+                let mut bytes = self.body(resp).await?;
+                if let Some(e) = served {
+                    // The checksum covers the stored bytes, which is what an
+                    // encoded body is served as: verify, then decode once.
+                    if sum.is_some_and(|want| crc32c::crc32c(&bytes) != want) {
+                        return Err(Error::corrupt(format!(
+                            "{key}: stored bytes fail their CRC-32C"
+                        )));
+                    }
+                    bytes = encoding::decode(e, &bytes, self.max_inflated)?;
+                }
                 let generation = match header_gen {
                     Some(g) => g,
                     // Emulators may omit the header: ask for the metadata.
@@ -190,17 +243,34 @@ impl<T: TokenProvider> Gcs<T> {
 
     async fn range_inner(&self, key: &str, range: Range<u64>) -> Result<Bytes> {
         if range.start >= range.end {
-            return match self.head_inner(key).await? {
+            return match self.stat_inner(key).await? {
+                Some(Stat { content_encoding: Some(e), .. }) => {
+                    Err(Error::EncodedRange { encoding: e.as_str().into() })
+                }
                 Some(_) => Ok(Bytes::new()),
                 None => Err(Error::NotFound),
             };
         }
         let url = format!("{}?alt=media", self.object_url(key));
         let header = format!("bytes={}-{}", range.start, range.end - 1);
-        let resp = self.send(|| self.http.get(&url).header("range", &header)).await?;
+        // `Accept-Encoding: gzip` keeps the server from decompressing an
+        // encoded object (and ignoring the range) only to have it refused.
+        let resp = self.send(|| stored_bytes(self.http.get(&url).header("range", &header))).await?;
+        if matches!(resp.status().as_u16(), 200 | 206 | 416) {
+            if let Some(token) = stored_encoding(&resp) {
+                return Err(Error::EncodedRange { encoding: token });
+            }
+        }
         match resp.status().as_u16() {
             404 => Err(Error::NotFound),
-            416 => Ok(Bytes::new()),
+            // A range past the end names no encoding in its headers: only
+            // an encoded object costs the metadata read that settles it.
+            416 => match self.stat_inner(key).await? {
+                Some(Stat { content_encoding: Some(e), .. }) => {
+                    Err(Error::EncodedRange { encoding: e.as_str().into() })
+                }
+                _ => Ok(Bytes::new()),
+            },
             206 => self.body(resp).await,
             // A server may ignore Range and send everything: slice it here.
             200 => {
@@ -211,9 +281,22 @@ impl<T: TokenProvider> Gcs<T> {
         }
     }
 
-    async fn put_inner(&self, key: &str, body: Bytes, cond: Cond) -> Result<u64> {
+    /// Upload `stored` (the bytes as kept: `body` itself, or `body` encoded
+    /// with `encoding`).
+    async fn put_inner(
+        &self,
+        key: &str,
+        body: Bytes,
+        stored: Bytes,
+        cond: Cond,
+        encoding: Option<ContentEncoding>,
+    ) -> Result<u64> {
         let mut query = String::from("name=");
         encode_component(key, &mut query);
+        if let Some(e) = encoding {
+            query.push_str("&contentEncoding=");
+            query.push_str(e.as_str());
+        }
         match cond {
             Cond::None => {}
             Cond::CreateOnly => query.push_str("&ifGenerationMatch=0"),
@@ -222,8 +305,8 @@ impl<T: TokenProvider> Gcs<T> {
                 let _ = write!(query, "&ifGenerationMatch={g}");
             }
         }
-        let (status, resp) = if body.len() >= self.cfg.resumable_threshold {
-            self.put_resumable(&query, &body).await?
+        let (status, resp) = if stored.len() >= self.cfg.resumable_threshold {
+            self.put_resumable(&query, &stored).await?
         } else {
             let url = format!("{}/o?uploadType=media&{query}", self.upload);
             let resp = self
@@ -231,7 +314,7 @@ impl<T: TokenProvider> Gcs<T> {
                     self.http
                         .post(&url)
                         .header("content-type", "application/octet-stream")
-                        .body(body.clone())
+                        .body(stored.clone())
                 })
                 .await?;
             (resp.status().as_u16(), resp)
@@ -243,7 +326,8 @@ impl<T: TokenProvider> Gcs<T> {
             }
             412 if cond != Cond::None => {
                 // Either a real conflict, or our earlier attempt landed and its
-                // response was lost. Our bytes being there settles it.
+                // response was lost. Our bytes being there settles it (an
+                // encoded object reads back decoded, so compare the body).
                 if let Some(o) = self.get_inner(key).await? {
                     if o.bytes == body
                         && !matches!(cond, Cond::IfGeneration(g) if g == o.generation)
@@ -291,13 +375,31 @@ impl<T: TokenProvider> Gcs<T> {
     }
 
     async fn list_inner(&self, prefix: &str) -> Result<Vec<Meta>> {
+        self.list_pages(prefix, "items(name,size,generation)", wire::parse_list, |m| &m.key).await
+    }
+
+    async fn list_stat_inner(&self, prefix: &str) -> Result<Vec<Stat>> {
+        self.list_pages(
+            prefix,
+            "items(name,size,generation,contentEncoding)",
+            wire::parse_list_stat,
+            |s| &s.meta.key,
+        )
+        .await
+    }
+
+    /// Every page of a listing of `items` fields, parsed by `parse`.
+    async fn list_pages<M: Ord>(
+        &self,
+        prefix: &str,
+        items: &str,
+        parse: fn(&[u8]) -> Result<Page<M>>,
+        key_of: fn(&M) -> &String,
+    ) -> Result<Vec<M>> {
         let mut out = Vec::new();
         let mut page: Option<String> = None;
         loop {
-            let mut url = format!(
-                "{}/o?fields=items(name,size,generation),nextPageToken&maxResults=1000",
-                self.api
-            );
+            let mut url = format!("{}/o?fields={items},nextPageToken&maxResults=1000", self.api);
             if !prefix.is_empty() {
                 url.push_str("&prefix=");
                 encode_component(prefix, &mut url);
@@ -311,13 +413,12 @@ impl<T: TokenProvider> Gcs<T> {
                 return Err(status_error(resp).await);
             }
             let body = self.body(resp).await?;
-            let (items, next) = wire::parse_list(&body)?;
+            let (items, next) = parse(&body)?;
             // Objects written by other tools may not fit the key grammar: skip them.
-            out.extend(
-                items
-                    .into_iter()
-                    .filter(|m| Key::parse(&m.key).is_ok() && m.key.starts_with(prefix)),
-            );
+            out.extend(items.into_iter().filter(|m| {
+                let k = key_of(m);
+                Key::parse(k).is_ok() && k.starts_with(prefix)
+            }));
             match next {
                 Some(n) if !n.is_empty() => page = Some(n),
                 _ => break,
@@ -376,7 +477,7 @@ impl<T: TokenProvider> ObjectStore for Gcs<T> {
     }
 
     fn put<'a>(&'a self, key: &'a str, body: Bytes, cond: Cond) -> Self::Put<'a> {
-        async move { self.put_inner(Key::parse(key)?.as_str(), body, cond).await }
+        async move { self.put_inner(Key::parse(key)?.as_str(), body.clone(), body, cond, None).await }
     }
 
     fn list<'a>(&'a self, prefix: &'a str) -> Self::List<'a> {
@@ -388,6 +489,27 @@ impl<T: TokenProvider> ObjectStore for Gcs<T> {
 
     fn delete<'a>(&'a self, key: &'a str) -> Self::Delete<'a> {
         async move { self.delete_inner(Key::parse(key)?.as_str()).await }
+    }
+
+    async fn put_encoded<'a>(
+        &'a self,
+        key: &'a str,
+        body: Bytes,
+        cond: Cond,
+        encoding: ContentEncoding,
+    ) -> Result<u64> {
+        let key = Key::parse(key)?.as_str();
+        let stored = encoding::encode(encoding, &body)?;
+        self.put_inner(key, body, stored, cond, Some(encoding)).await
+    }
+
+    async fn stat<'a>(&'a self, key: &'a str) -> Result<Option<Stat>> {
+        self.stat_inner(Key::parse(key)?.as_str()).await
+    }
+
+    async fn list_stat<'a>(&'a self, prefix: &'a str) -> Result<Vec<Stat>> {
+        check_prefix(prefix)?;
+        self.list_stat_inner(prefix).await
     }
 }
 
@@ -410,6 +532,51 @@ fn generation_header(resp: &reqwest::Response) -> Option<u64> {
         .filter(|g| *g != 0)
 }
 
+/// Ask for an object's stored bytes as they are (`Accept-Encoding: gzip`),
+/// so Cloud Storage never decompresses server-side. Only a build that can
+/// decode them asks: without feature `gzip`, a gzip object written by another
+/// tool keeps arriving decoded by the server, exactly as before.
+fn stored_bytes(req: reqwest::RequestBuilder) -> reqwest::RequestBuilder {
+    if cfg!(feature = "gzip") {
+        req.header("accept-encoding", "gzip")
+    } else {
+        req
+    }
+}
+
+/// The encoding a body was *served* with (`Content-Encoding`); `None` for
+/// bytes as written, including bytes the server already decoded.
+fn served_encoding(resp: &reqwest::Response) -> Result<Option<ContentEncoding>> {
+    match resp.headers().get("content-encoding") {
+        None => Ok(None),
+        Some(v) => ContentEncoding::parse(
+            v.to_str().map_err(|_| Error::protocol("unreadable content-encoding"))?,
+        ),
+    }
+}
+
+/// The encoding an object is *stored* with, from either header (a server may
+/// send only one): `None` for identity.
+fn stored_encoding(resp: &reqwest::Response) -> Option<String> {
+    ["x-goog-stored-content-encoding", "content-encoding"].iter().find_map(|h| {
+        let v = resp.headers().get(*h)?.to_str().unwrap_or("unreadable").trim();
+        (!v.is_empty() && !v.eq_ignore_ascii_case("identity")).then(|| v.chars().take(64).collect())
+    })
+}
+
+/// The stored bytes' CRC-32C, when the body is served as stored.
+fn stored_crc32c(resp: &reqwest::Response) -> Option<u32> {
+    let h = resp.headers();
+    let served = h.get("content-encoding").and_then(|v| v.to_str().ok());
+    // Absent: assume as stored (Cloud Storage always sends it; a server that
+    // does not cannot be transcoding either).
+    let stored = h.get("x-goog-stored-content-encoding").and_then(|v| v.to_str().ok());
+    if stored.is_some_and(|s| Some(s) != served) {
+        return None;
+    }
+    crc32c::from_goog_hash(h.get_all("x-goog-hash").iter().filter_map(|v| v.to_str().ok()))
+}
+
 async fn status_error(resp: reqwest::Response) -> Error {
     let status = resp.status().as_u16();
     let body = resp.bytes().await.unwrap_or_default();
@@ -419,6 +586,15 @@ async fn status_error(resp: reqwest::Response) -> Error {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn only_a_build_that_decodes_asks_for_stored_bytes() {
+        // Without the codec, asking would turn a gzip object another tool
+        // wrote (served decoded by default) into an unreadable one.
+        let req = stored_bytes(reqwest::Client::new().get("http://127.0.0.1/o")).build().unwrap();
+        let asked = req.headers().get("accept-encoding").and_then(|v| v.to_str().ok());
+        assert_eq!(asked, cfg!(feature = "gzip").then_some("gzip"));
+    }
 
     #[test]
     fn bucket_names_and_endpoints() {

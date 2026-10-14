@@ -32,6 +32,12 @@ except objstore_r.PreconditionFailedError:
   buffer protocol; pass a `Blob` back to `put` and it is not copied either.
 - **Ranged and concurrent reads.** `get_range(key, start, end)`;
   `get_many(keys)` fetches concurrently.
+- **Opt-in compression.** `put(key, data, content_encoding="gzip")` stores an
+  object compressed (on GCS as its `contentEncoding`); `get` decodes it once,
+  in Rust, and the `Blob` is zero-copy from there. `Meta.content_encoding`
+  reports it from `head` and `list`. A ranged read of an encoded object raises
+  `EncodedRangeError`; decoding stops at `max_inflated` bytes (1 GiB by
+  default, a keyword on every constructor) with `TooLargeError`.
 - **Safe keys.** `/`-separated segments of `[A-Za-z0-9._-]`, validated before
   any I/O: no traversal, no hidden files, portable to every OS
   (`InvalidKeyError` otherwise).
@@ -52,7 +58,10 @@ except objstore_r.PreconditionFailedError:
 All derive from `ObjstoreError`: `NotFoundError` (ranged read of a missing
 object; `get`/`head` return `None` instead), `ConflictError`,
 `PreconditionFailedError`, `InvalidKeyError`, `UnavailableError`,
-`AuthError`, `TooLargeError`, `ProtocolError`.
+`AuthError`, `TooLargeError`, `ProtocolError`, `EncodedRangeError` (ranged
+read of an encoded object), `UnsupportedEncodingError` (an object stored with
+an encoding this build cannot decode). An unknown `content_encoding=`
+argument is a `ValueError` before any I/O.
 
 ## Testing your code
 
