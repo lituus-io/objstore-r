@@ -506,7 +506,7 @@ dependencies = [
 
 [[package]]
 name = "objstore-r-python"
-version = "0.2.1"
+version = "0.2.2"
 dependencies = [
  "futures-executor",
  "futures-util",
@@ -1163,7 +1163,7 @@ dependencies = [
 
 [[package]]
 name = "uu-objstore-r"
-version = "0.2.1"
+version = "0.2.2"
 dependencies = [
  "bytes",
  "reqwest",

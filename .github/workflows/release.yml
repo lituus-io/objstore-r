@@ -59,8 +59,10 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - run: cargo test --all-features
       - run: cargo package --allow-dirty --no-verify --list
-      # API compatibility against the previous release tag (skipped for the
-      # first release, which has no baseline).
+      # API compatibility against the previous release (skipped for the first
+      # release, which has no baseline). The baseline is the published crate
+      # on crates.io, not a git checkout of the tag: a checkout is extracted
+      # under target/ where the ../graph-r path dependency does not resolve.
       - name: Semver check
         run: |
           prev=$(git tag --sort=-v:refname | grep -v "^${GITHUB_REF_NAME}$" | head -1 || true)
@@ -70,7 +72,7 @@ jobs:
             echo "baseline $prev predates the uu-objstore-r name: skipped"
           else
             RUSTUP_TOOLCHAIN=stable cargo install cargo-semver-checks --locked
-            cargo semver-checks --baseline-rev "$prev" --all-features
+            cargo semver-checks --baseline-version "${prev#v}" --all-features
           fi
 
   # One abi3 wheel per platform: the binding builds against the stable ABI

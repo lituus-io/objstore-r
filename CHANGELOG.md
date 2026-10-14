@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.2.2
+
+- Release: the semver check compares against the published crate on
+  crates.io; 0.2.1's check could not resolve the graph-r path dependency in
+  its git baseline, so 0.2.1 reached crates.io only. 0.2.2 is the same code
+  and lockfiles, released to every channel.
+
 ## 0.2.1
 
 - Security: every lockfile (crate, Python binding, fuzz) refreshed to
