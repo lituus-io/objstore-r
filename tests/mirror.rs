@@ -202,12 +202,46 @@ fn two_writers_from_one_state_exactly_one_wins() {
 }
 
 #[test]
-fn a_writable_store_blocks_pulls_into_its_directory() {
-    let (dir, store) = writer();
+fn a_held_writer_lock_blocks_pulls_into_its_directory() {
+    let (_src, store) = writer();
     let mem = Mem::default();
     block_on(Mirror::new(&mem, "kb").unwrap().publish(&store)).unwrap();
-    let err = block_on(Mirror::new(&mem, "kb").unwrap().pull_into(dir.path())).unwrap_err();
+    let dst = tempfile::tempdir().unwrap();
+    let _held = graph_r::fsio::try_lock(&dst.path().join(graph_r::store::LOCK_FILE))
+        .unwrap()
+        .expect("the lock is free");
+    let err = block_on(Mirror::new(&mem, "kb").unwrap().pull_into(dst.path())).unwrap_err();
     assert!(matches!(err, Error::Graph(graph_r::Error::Locked)), "{err}");
+    assert_eq!(std::fs::read_dir(dst.path()).unwrap().count(), 1, "only the lock file");
+}
+
+/// A pull into a directory a writable store has open is either refused
+/// (graph-r holding its lock for the handle's life) or serialised against
+/// that writer's commits, which then build on the pulled state. Never a fork:
+/// the open writer and a fresh open always read the same store.
+#[test]
+fn a_pull_under_an_open_writer_is_refused_or_converges() {
+    let (_src, published) = writer();
+    for i in 1..=3 {
+        page(&published, i);
+    }
+    let mem = Mem::default();
+    block_on(Mirror::new(&mem, "kb").unwrap().publish(&published)).unwrap();
+
+    let (dir, local) = writer();
+    page(&local, 100);
+    page(&local, 101);
+    match block_on(Mirror::new(&mem, "kb").unwrap().pull_into(dir.path())) {
+        Err(Error::Graph(graph_r::Error::Locked)) => assert_eq!(local.len(), 2),
+        Err(e) => panic!("{e}"),
+        Ok(pulled) => {
+            assert!(pulled.is_some());
+            page(&local, 200);
+            assert_eq!(local.len(), 4, "the pulled three plus the new commit");
+            drop(local);
+            assert_eq!(Store::open_read_only(dir.path()).unwrap().len(), 4);
+        }
+    }
 }
 
 #[test]

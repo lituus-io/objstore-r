@@ -2,8 +2,8 @@
 // Copyright: lituus-io, all rights reserved
 //
 //! Local file plumbing over graph-r's shared primitives: the store
-//! directory's writer lock (the very lock a writable `Store` takes, so the
-//! two can never both write one directory), atomic multi-part writes, and
+//! directory's writer lock (the very lock a writable `Store` writes under, so
+//! the two never write one directory at once), atomic multi-part writes, and
 //! durable appends.
 
 use super::{Error, Result};
