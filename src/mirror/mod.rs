@@ -418,7 +418,10 @@ impl<'o, O: ObjectStore> Mirror<'o, O> {
     /// Rebuild `graph.base` and `graph.wal` in `dir` from the published
     /// store, then open it with [`graph_r::Store::open`]. `None` (and `dir`
     /// untouched) when nothing has been published. Refused with
-    /// `graph_r::Error::Locked` while a writable store has `dir` open.
+    /// `graph_r::Error::Locked` while another holder has the directory's
+    /// writer lock. A writable store with `dir` open either holds that lock
+    /// for its life (graph-r 0.4) or takes it per commit (0.5), in which case
+    /// its next commit builds on the pulled state.
     pub fn pull_into<'a>(
         &'a self,
         dir: &'a Path,

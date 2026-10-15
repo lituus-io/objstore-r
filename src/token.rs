@@ -315,21 +315,38 @@ impl Adc {
                 .map_err(|_| Error::Auth { message: "unreadable credentials file".into() })?;
             return GcloudUser::from_json(&json).map(Adc::User);
         }
-        let home = std::env::var_os("HOME").or_else(|| std::env::var_os("APPDATA"));
-        if let Some(home) = home {
-            let mut p = std::path::PathBuf::from(home);
-            if cfg!(windows) {
-                p.push("gcloud");
-            } else {
-                p.push(".config/gcloud");
-            }
-            p.push("application_default_credentials.json");
-            if let Ok(json) = std::fs::read(&p) {
+        if let Some(dir) = gcloud_config_dir(|name: &str| std::env::var_os(name), cfg!(windows)) {
+            if let Ok(json) = std::fs::read(dir.join("application_default_credentials.json")) {
                 return GcloudUser::from_json(&json).map(Adc::User);
             }
         }
         Metadata::new().map(Adc::Metadata)
     }
+}
+
+/// gcloud's configuration directory, where `gcloud auth
+/// application-default login` writes the well-known credentials file:
+/// `CLOUDSDK_CONFIG` when set, else `%APPDATA%\gcloud` on Windows and
+/// `$HOME/.config/gcloud` elsewhere.
+///
+/// Windows never consults `HOME`: OpenSSH, Git Bash and MSYS set it to the
+/// profile directory, and `%HOME%\gcloud` is not where gcloud writes, so a
+/// HOME-first lookup missed the file and fell through to the metadata server --
+/// on a GCE VM that silently authenticated as the VM's own service account.
+/// `var` is the environment, passed in so the rule is tested without touching
+/// the process's own.
+fn gcloud_config_dir<F>(var: F, windows: bool) -> Option<std::path::PathBuf>
+where
+    F: Fn(&str) -> Option<std::ffi::OsString>,
+{
+    let set = |name: &str| var(name).filter(|v| !v.is_empty());
+    if let Some(dir) = set("CLOUDSDK_CONFIG") {
+        return Some(std::path::PathBuf::from(dir));
+    }
+    if windows {
+        return set("APPDATA").map(|a| std::path::PathBuf::from(a).join("gcloud"));
+    }
+    set("HOME").map(|h| std::path::PathBuf::from(h).join(".config").join("gcloud"))
 }
 
 impl TokenProvider for Adc {
@@ -355,6 +372,48 @@ impl TokenProvider for Adc {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn env<'a>(
+        pairs: &'a [(&'a str, &'a str)],
+    ) -> impl Fn(&str) -> Option<std::ffi::OsString> + 'a {
+        move |name| pairs.iter().find(|(k, _)| *k == name).map(|(_, v)| std::ffi::OsString::from(v))
+    }
+
+    #[test]
+    fn windows_reads_appdata_even_when_home_is_set() {
+        let e = [("HOME", r"C:\Users\a"), ("APPDATA", r"C:\Users\a\AppData\Roaming")];
+        assert_eq!(
+            gcloud_config_dir(env(&e), true),
+            Some(std::path::PathBuf::from(r"C:\Users\a\AppData\Roaming").join("gcloud"))
+        );
+    }
+
+    #[test]
+    fn posix_reads_home_dot_config() {
+        let e = [("HOME", "/home/a"), ("APPDATA", "/ignored")];
+        assert_eq!(
+            gcloud_config_dir(env(&e), false),
+            Some(std::path::PathBuf::from("/home/a").join(".config").join("gcloud"))
+        );
+    }
+
+    #[test]
+    fn cloudsdk_config_wins_on_every_os() {
+        let e = [("CLOUDSDK_CONFIG", "/custom"), ("HOME", "/home/a"), ("APPDATA", "/appdata")];
+        for windows in [true, false] {
+            assert_eq!(
+                gcloud_config_dir(env(&e), windows),
+                Some(std::path::PathBuf::from("/custom"))
+            );
+        }
+    }
+
+    #[test]
+    fn empty_values_count_as_unset() {
+        let e = [("CLOUDSDK_CONFIG", ""), ("APPDATA", "")];
+        assert_eq!(gcloud_config_dir(env(&e), true), None);
+        assert_eq!(gcloud_config_dir(env(&[("HOME", "")]), false), None);
+    }
 
     #[test]
     fn tokens_are_never_printed() {
