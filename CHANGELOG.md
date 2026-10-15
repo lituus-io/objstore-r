@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.2.4
+
+- Fixed: on Windows, Application Default Credentials were looked for under
+  `%HOME%\gcloud` whenever `HOME` was set -- which OpenSSH, Git Bash and MSYS
+  all do -- instead of `%APPDATA%\gcloud`, where `gcloud auth
+  application-default login` writes them. The lookup missed the file and fell
+  through to the metadata server: on a GCE VM it silently authenticated as the
+  VM's own service account, and elsewhere it failed. The well-known file is now
+  found in `CLOUDSDK_CONFIG` when set, else `%APPDATA%\gcloud` on Windows and
+  `$HOME/.config/gcloud` elsewhere; `HOME` is never consulted on Windows, and an
+  empty variable counts as unset.
+
 ## 0.2.3
 
 - Opt-in content encoding (feature `gzip`, flate2 on the pure-Rust
