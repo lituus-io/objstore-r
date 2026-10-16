@@ -3,12 +3,10 @@
 ## 0.3.0
 
 - **Breaking, for Rust code that builds `GcsConfig` or `HttpConfig` with a
-  struct literal:** `GcsConfig.timeout` is renamed `request_timeout` and both
-  configs gain fields (below). Both are now `#[non_exhaustive]`, so future
-  settings are additive: start from `Default::default()` and assign the
-  fields to change (outside this crate a struct literal, even with
-  `..Default::default()`, no longer compiles). Code that uses `Default` is
-  unaffected; Python keeps accepting `timeout=`.
+  struct literal:** `GcsConfig.timeout` is renamed `request_timeout`, and both
+  configs gain fields (below). A literal that ends `..Default::default()`
+  needs only the rename; code that uses `Default` is unaffected; Python keeps
+  accepting `timeout=`.
 - Fixed: one total timeout (60 s) covered every GCS request body included, so
   any object larger than 60 s of the link's speed failed on every attempt
   (100 MiB at 1 MiB/s, or 200 MiB over a 20 Mbit/s uplink), and each retry
