@@ -419,3 +419,52 @@ fn a_memory_only_replica_refuses_tampered_objects() {
         block_on(mem.put(&victim, original, Cond::None)).unwrap();
     }
 }
+
+/// A base published in another format version (an older release's, say)
+/// pulls as graph-r's typed `Version`, naming both versions, never as
+/// `Corrupt`: the caller rebuilds instead of reporting damage.
+#[test]
+fn a_base_of_another_format_version_pulls_as_a_typed_version_error() {
+    use graph_r::format::base;
+    use graph_r::hash::xxh3_64;
+    let (_dir, store) = writer();
+    page(&store, 1);
+    let mem = Mem::default();
+    block_on(Mirror::new(&mem, "kb").unwrap().publish(&store)).unwrap();
+    // Rewrite the published base as the other version would have written
+    // it: the version field, the header checksum over it, and HEAD's sum of
+    // the base (with HEAD's own checksum).
+    let other = base::VERSION ^ 1;
+    let key = format!("kb/base/{:016x}.base", store.generation());
+    let mut b = block_on(mem.get(&key)).unwrap().unwrap().bytes.to_vec();
+    b[4..6].copy_from_slice(&other.to_le_bytes());
+    let sum = xxh3_64(&b[..120]);
+    b[120..128].copy_from_slice(&sum.to_le_bytes());
+    let mut head = block_on(mem.get("kb/HEAD")).unwrap().unwrap().bytes.to_vec();
+    head[24..32].copy_from_slice(&xxh3_64(&b).to_le_bytes());
+    let n = head.len() - 8;
+    let sum = xxh3_64(&head[..n]);
+    head[n..].copy_from_slice(&sum.to_le_bytes());
+    block_on(mem.put(&key, Bytes::from(b), Cond::None)).unwrap();
+    block_on(mem.put("kb/HEAD", Bytes::from(head), Cond::None)).unwrap();
+    let dst = tempfile::tempdir().unwrap();
+    let pulled = block_on(Mirror::new(&mem, "kb").unwrap().pull_into(dst.path()));
+    let image = block_on(Mirror::new(&mem, "kb").unwrap().load_image());
+    // graph-r's typed `Version { found, supported }` (its text keeps the
+    // prefix every release printed; graph-r before 0.4.2 had only the text).
+    let typed = format!("Version {{ found: {other}, supported: {} }}", base::VERSION);
+    let text = format!("format error: unsupported version {other}");
+    for (what, r) in [("pull_into", pulled.map(|_| ())), ("load_image", image.map(|_| ()))] {
+        match r {
+            Err(Error::Graph(e)) => {
+                assert!(e.to_string().starts_with(&text), "{what}: {e}");
+                let debug = format!("{e:?}");
+                assert!(debug == typed || debug.starts_with("Format"), "{what}: {debug}");
+            }
+            other => panic!("{what}: expected graph-r's refusal, got {other:?}"),
+        }
+    }
+    for f in ["graph.base", "graph.wal"] {
+        assert!(!dst.path().join(f).exists(), "{f} was laid down");
+    }
+}
