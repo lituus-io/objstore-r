@@ -1,5 +1,38 @@
 # Changelog
 
+## 0.2.5
+
+- Fixed: one total timeout (60 s) covered every GCS request body included, so
+  any object larger than 60 s of the link's speed failed on every attempt
+  (100 MiB at 1 MiB/s, or 200 MiB over a 20 Mbit/s uplink), and each retry
+  restarted from byte 0. Timeouts now bound stalls, not sizes: `GcsConfig`
+  gains `connect_timeout` (10 s), `request_timeout` (30 s, small requests and
+  the wait for a download's headers; replaces `timeout`), `idle_timeout`
+  (60 s without a byte fails a download) and `min_throughput` (64 KiB/s: an
+  upload request of `n` bytes may take `request_timeout + n /
+  min_throughput`). No timeout covers a whole transfer. Invalid settings are
+  refused by `Gcs::new`.
+- Fixed: the resumable upload sent the whole body in one `PUT` and resent all
+  of it after a failure. Uploads at or above `resumable_threshold` now go in
+  `upload_chunk` pieces (8 MiB, a multiple of 256 KiB) with `Content-Range`;
+  after a transient failure the session is asked for its committed length
+  and only the remainder is sent. An expired session (404/410) restarts once.
+  Hostile or broken 308 ranges are `Error::Protocol`, never a loop. The body
+  is sliced, never copied.
+- Downloads resume: a whole-object read that breaks off asks for the rest
+  with `Range` pinned by `ifGenerationMatch`; an object replaced in between is
+  the new `Error::Changed` (Python: `ChangedError`), never a splice. The
+  object's CRC-32C is now verified for plain reads too, over the assembled
+  bytes. Encoded bodies restart from byte 0 instead (bounded).
+- The resumable session URL must be on the upload endpoint's own origin
+  (previously any `https://` URL was accepted).
+- `http::HttpConfig` gains `idle_timeout` (60 s) and `min_throughput`;
+  `timeout` and `stream_timeout` now bound the wait for response headers and
+  bodies are bounded by the idle timeout between chunks, not by a total.
+- Python: `Store.gcs` takes `connect_timeout`, `request_timeout`,
+  `idle_timeout`, `min_throughput` and `upload_chunk`; `timeout` is still
+  accepted as the old name of `request_timeout`.
+
 ## 0.2.4
 
 - Fixed: on Windows, Application Default Credentials were looked for under
