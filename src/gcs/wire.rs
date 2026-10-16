@@ -95,7 +95,11 @@ pub fn fuzz(body: &[u8]) {
     let _ = parse_list(body);
     let _ = parse_stat(body);
     let _ = parse_list_stat(body);
-    let _ = super::crc32c::from_goog_hash(std::str::from_utf8(body).ok());
+    if let Ok(text) = std::str::from_utf8(body) {
+        let _ = super::crc32c::from_goog_hash(Some(text));
+        let _ = super::ranges::committed(Some(text), u64::MAX);
+        let _ = super::ranges::content_range(text);
+    }
 }
 
 #[cfg(test)]

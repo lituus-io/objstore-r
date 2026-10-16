@@ -186,6 +186,84 @@ async fn streamed_bodies_arrive_in_order_and_can_be_abandoned() {
     assert!(abandoned);
 }
 
+/// Answer one request with headers, then `pieces` body pieces `gap` apart;
+/// with `stall`, go silent after the second piece instead.
+async fn trickle(listener: &TcpListener, pieces: usize, gap: Duration, stall: bool) {
+    let (mut sock, _) = listener.accept().await.unwrap();
+    let mut buf = [0u8; 4096];
+    let _ = sock.read(&mut buf).await;
+    let head = format!("HTTP/1.1 200 OK\r\ncontent-length: {pieces}\r\nconnection: close\r\n\r\n");
+    let _ = sock.write_all(head.as_bytes()).await;
+    for i in 0..pieces {
+        if stall && i == 2 {
+            tokio::time::sleep(Duration::from_secs(3600)).await;
+        }
+        tokio::time::sleep(gap).await;
+        let _ = sock.write_all(b"z").await;
+    }
+}
+
+/// Header waits of 300 ms; bodies under an idle timeout of 300 ms.
+fn quick() -> Client<Static> {
+    let cfg = HttpConfig {
+        timeout: Duration::from_millis(300),
+        stream_timeout: Duration::from_millis(300),
+        idle_timeout: Duration::from_millis(300),
+        max_retries: 0,
+        ..HttpConfig::default()
+    };
+    Client::new(Static::new("tok"), cfg).unwrap()
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn a_slow_body_that_keeps_moving_is_not_cut_off() {
+    // Eight bytes 100 ms apart: 800 ms in all, well past the 300 ms header
+    // wait that used to be the whole request's bound.
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let url = format!("http://127.0.0.1:{}/slow", listener.local_addr().unwrap().port());
+    let gap = Duration::from_millis(100);
+    let c = quick();
+    let (_, r) = tokio::join!(trickle(&listener, 8, gap, false), c.send(Request::get(&url)));
+    assert_eq!(&r.unwrap().body[..], b"zzzzzzzz");
+    let ((), streamed) = tokio::join!(trickle(&listener, 8, gap, false), async {
+        let (_, mut body) = c.open(Request::get(&url)).await?;
+        let mut n = 0;
+        while let Some(c) = body.next_chunk().await? {
+            n += c.len();
+        }
+        Ok::<_, Error>(n)
+    });
+    assert_eq!(streamed.unwrap(), 8);
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn a_stalled_body_fails_in_about_the_idle_timeout() {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let url = format!("http://127.0.0.1:{}/stall", listener.local_addr().unwrap().port());
+    let c = quick();
+    let t = std::time::Instant::now();
+    let run = async {
+        tokio::select! {
+            () = trickle(&listener, 8, Duration::from_millis(10), true) => unreachable!(),
+            r = c.send(Request::get(&url)) => r,
+        }
+    };
+    let r = tokio::time::timeout(Duration::from_secs(10), run).await.expect("the client hung");
+    let took = t.elapsed();
+    assert!(matches!(&r, Err(Error::Unavailable { retriable: true, .. })), "{r:?}");
+    assert!(took >= Duration::from_millis(300) && took < Duration::from_secs(1), "{took:?}");
+}
+
+#[test]
+fn zero_bounds_are_refused() {
+    for cfg in [
+        HttpConfig { idle_timeout: Duration::ZERO, ..HttpConfig::default() },
+        HttpConfig { min_throughput: 0, ..HttpConfig::default() },
+    ] {
+        assert!(matches!(Client::new(Static::new("t"), cfg), Err(Error::Protocol { .. })));
+    }
+}
+
 #[tokio::test(flavor = "current_thread")]
 async fn invalid_requests_fail_before_any_io() {
     let c = client(1024);
