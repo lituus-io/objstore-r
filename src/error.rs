@@ -88,6 +88,11 @@ pub enum Error {
         /// The encoding named (at most 64 characters).
         encoding: String,
     },
+    /// The object was replaced or deleted while a read that had to resume
+    /// was in flight. Nothing from either generation is returned (two
+    /// generations are never spliced); read it again.
+    #[error("object replaced during a resumed read")]
+    Changed,
 }
 
 impl Error {

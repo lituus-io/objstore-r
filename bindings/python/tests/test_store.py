@@ -141,4 +141,4 @@ def test_local_symlinks_cannot_escape(tmp_path):
 
 
 def test_version():
-    assert o.__version__ == "0.2.4"
+    assert o.__version__ == "0.3.0"

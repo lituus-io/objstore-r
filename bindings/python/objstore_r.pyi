@@ -20,6 +20,7 @@ class TooLargeError(ObjstoreError): ...
 class ProtocolError(ObjstoreError): ...
 class EncodedRangeError(ObjstoreError): ...
 class UnsupportedEncodingError(ObjstoreError): ...
+class ChangedError(ObjstoreError): ...
 
 @final
 class Blob(Buffer):
@@ -57,11 +58,16 @@ class Store:
         token: str | None = None,
         anonymous: bool = False,
         endpoint: str | None = None,
-        timeout: float = 60.0,
+        connect_timeout: float = 10.0,
+        request_timeout: float = 30.0,
+        idle_timeout: float = 60.0,
+        min_throughput: int = 64 << 10,
         max_retries: int = 5,
         max_object_bytes: int = 4 << 30,
         resumable_threshold: int = 8 << 20,
+        upload_chunk: int = 8 << 20,
         max_inflated: int = 1 << 30,
+        timeout: float | None = None,
     ) -> Store: ...
     @property
     def kind(self) -> str: ...

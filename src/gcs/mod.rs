@@ -9,8 +9,17 @@
 //!   transport errors. A conditional write whose first attempt succeeded but
 //!   whose response was lost comes back as 412 on retry; the store then reads
 //!   the object back and, if it holds exactly our bytes, reports success.
-//! - **Uploads** are single requests up to [`GcsConfig::resumable_threshold`]
-//!   and resumable sessions above it.
+//! - **Uploads** are single requests below [`GcsConfig::resumable_threshold`]
+//!   and chunked resumable sessions at or above it: each
+//!   [`GcsConfig::upload_chunk`] is one `PUT` with `Content-Range`, and a
+//!   failed chunk resumes from the offset the server reports as committed,
+//!   so only the remainder is sent again.
+//! - **Downloads** resume: a whole-object read that drops mid-body asks for
+//!   the rest with `Range`, pinned to the generation it started on, and
+//!   verifies the object's CRC-32C over the assembled bytes.
+//! - **Timeouts** bound stalls, not sizes (see [`GcsConfig`]): a transfer may
+//!   take as long as it needs while bytes keep moving, and fails within
+//!   [`GcsConfig::idle_timeout`] once they stop.
 //! - **Ranged reads** send `Range`, so a caller can fetch a header or one
 //!   section of a large snapshot without downloading all of it.
 //! - **Safety:** the endpoint must be `https://` (plain `http://` is accepted
@@ -30,6 +39,7 @@
 //!   before any body is read.
 
 mod crc32c;
+mod ranges;
 mod wire;
 
 #[doc(hidden)]
@@ -47,31 +57,102 @@ use std::time::Duration;
 /// One listing page: its items and the next page token.
 type Page<M> = (Vec<M>, Option<String>);
 
+/// Granularity of a resumable upload chunk (Cloud Storage's rule).
+const CHUNK_UNIT: usize = 256 << 10;
+
 /// Settings.
+///
+/// No timeout covers a whole transfer: a 300 MiB object over a slow link
+/// takes as long as it takes. What is bounded is time without progress — a
+/// response that does not start, a body that stops arriving, an upload chunk
+/// that does not finish at a floor rate — so a dead connection fails in
+/// about [`idle_timeout`](Self::idle_timeout) whatever the object's size.
 #[derive(Debug, Clone)]
 pub struct GcsConfig {
     /// API endpoint (`https://storage.googleapis.com`, or an emulator).
     pub endpoint: String,
-    /// Per-request timeout.
-    pub timeout: Duration,
-    /// Retries after the first attempt for transient failures.
+    /// Connection establishment (TCP, TLS and any proxy `CONNECT`).
+    pub connect_timeout: Duration,
+    /// A whole small request: metadata, listing pages, deletes, starting a
+    /// resumable session and asking it for its committed offset. Also the
+    /// wait for a download's response headers, and the fixed part of an
+    /// upload's bound (see [`min_throughput`](Self::min_throughput)).
+    pub request_timeout: Duration,
+    /// The longest a download may receive no bytes before the attempt fails
+    /// (and resumes from where it stopped).
+    pub idle_timeout: Duration,
+    /// The slowest upload rate tolerated, in bytes per second: one upload
+    /// request of `n` bytes (a chunk, or a whole small object) fails after
+    /// `request_timeout + n / min_throughput`. Must not be zero.
+    pub min_throughput: u64,
+    /// Retries after the first attempt for transient failures; for a
+    /// resumable transfer, consecutive attempts that make no progress.
     pub max_retries: u32,
-    /// Largest body accepted from a read.
+    /// Largest body accepted from a read, across every resumed attempt.
     pub max_object_bytes: u64,
     /// Bodies at or above this size use a resumable upload session.
     pub resumable_threshold: usize,
+    /// Bytes per `PUT` of a resumable upload: a non-zero multiple of 256 KiB.
+    /// Smaller chunks lose less to a failure and cost a round trip each.
+    pub upload_chunk: usize,
 }
 
 impl Default for GcsConfig {
     fn default() -> Self {
         Self {
             endpoint: "https://storage.googleapis.com".into(),
-            timeout: Duration::from_secs(60),
+            connect_timeout: Duration::from_secs(10),
+            request_timeout: Duration::from_secs(30),
+            idle_timeout: Duration::from_secs(60),
+            min_throughput: 64 << 10,
             max_retries: 5,
             max_object_bytes: 4 << 30,
             resumable_threshold: 8 << 20,
+            upload_chunk: 8 << 20,
         }
     }
+}
+
+impl GcsConfig {
+    fn check(&self) -> Result<()> {
+        let bad = |what| Err(Error::protocol(format!("invalid configuration: {what}")));
+        if [self.connect_timeout, self.request_timeout, self.idle_timeout].contains(&Duration::ZERO)
+        {
+            return bad("timeouts must be positive");
+        }
+        if self.min_throughput == 0 {
+            return bad("min_throughput must be positive");
+        }
+        if self.upload_chunk == 0 || !self.upload_chunk.is_multiple_of(CHUNK_UNIT) {
+            return bad("upload_chunk must be a positive multiple of 256 KiB");
+        }
+        Ok(())
+    }
+
+    /// The bound on one upload request carrying `len` bytes.
+    fn upload_bound(&self, len: usize) -> Duration {
+        let ms = (len as u128 * 1000) / u128::from(self.min_throughput);
+        self.request_timeout
+            .saturating_add(Duration::from_millis(u64::try_from(ms).unwrap_or(u64::MAX)))
+    }
+}
+
+/// How long one request may take.
+#[derive(Debug, Clone, Copy)]
+enum Bound {
+    /// The whole exchange, body included (small requests, upload requests).
+    Whole(Duration),
+    /// Until the response headers; the body is then read under the idle
+    /// timeout, chunk by chunk (downloads).
+    Headers(Duration),
+}
+
+/// How a resumable session ended.
+enum Session {
+    /// The final response: the object, or a status for the caller to judge.
+    Done(u16, reqwest::Response),
+    /// 404/410: the session expired.
+    Gone,
 }
 
 /// A bucket as an [`ObjectStore`].
@@ -100,8 +181,15 @@ impl<T: TokenProvider> Gcs<T> {
                 "the endpoint must be https:// (http:// only for a loopback emulator)",
             ));
         }
+        cfg.check()?;
+        // No client-wide timeout: each request carries its own bound (see
+        // `Bound`). reqwest's `read_timeout` is not used either: its timer
+        // runs from the send to the response headers without being reset by
+        // request-body progress, so on an upload it is a total timeout again.
+        // The system proxy (`HTTPS_PROXY`, `NO_PROXY`) applies as reqwest's
+        // default.
         let http = reqwest::Client::builder()
-            .timeout(cfg.timeout)
+            .connect_timeout(cfg.connect_timeout)
             .redirect(reqwest::redirect::Policy::none())
             .pool_idle_timeout(Duration::from_secs(90))
             .user_agent(concat!("objstore-r/", env!("CARGO_PKG_VERSION")))
@@ -151,42 +239,100 @@ impl<T: TokenProvider> Gcs<T> {
         Ok(rb)
     }
 
+    /// A small request's bound.
+    fn small(&self) -> Bound {
+        Bound::Whole(self.cfg.request_timeout)
+    }
+
+    /// A download's bound: headers within `request_timeout`, then the body
+    /// under `idle_timeout`.
+    fn download(&self) -> Bound {
+        Bound::Headers(self.cfg.request_timeout)
+    }
+
+    /// One attempt of an authorised request under `bound`.
+    async fn dispatch(rb: reqwest::RequestBuilder, bound: Bound) -> Result<reqwest::Response> {
+        match bound {
+            Bound::Whole(d) => rb.timeout(d).send().await.map_err(|e| transport_error(&e)),
+            Bound::Headers(d) => match tokio::time::timeout(d, rb.send()).await {
+                Ok(r) => r.map_err(|e| transport_error(&e)),
+                Err(_) => Err(Error::unavailable("timed out", true)),
+            },
+        }
+    }
+
     /// Send with retries. `build` makes a fresh request per attempt.
-    async fn send(&self, build: impl Fn() -> reqwest::RequestBuilder) -> Result<reqwest::Response> {
+    async fn send(
+        &self,
+        bound: Bound,
+        build: impl Fn() -> reqwest::RequestBuilder,
+    ) -> Result<reqwest::Response> {
         let mut attempt = 0;
         loop {
+            // A fresh token per attempt (the provider caches it and renews it
+            // before expiry); failing to get one is reported at once.
             let rb = self.authed(build()).await?;
-            let outcome = rb.send().await;
+            let outcome = Self::dispatch(rb, bound).await;
             let retry = match &outcome {
                 Ok(r) => is_retriable_status(r.status().as_u16()),
-                Err(e) => e.is_timeout() || e.is_connect() || e.is_request(),
+                Err(e) => e.is_retriable(),
             };
             if !retry || attempt >= self.cfg.max_retries {
-                return outcome.map_err(|e| transport_error(&e));
+                return outcome;
             }
             attempt += 1;
             tokio::time::sleep(backoff(attempt)).await;
         }
     }
 
-    async fn body(&self, resp: reqwest::Response) -> Result<Bytes> {
-        if resp.content_length().is_some_and(|n| n > self.cfg.max_object_bytes) {
-            return Err(Error::TooLarge { limit: self.cfg.max_object_bytes });
-        }
-        let mut resp = resp;
-        let mut buf = bytes::BytesMut::new();
-        while let Some(chunk) = resp.chunk().await.map_err(|e| transport_error(&e))? {
-            if (buf.len() + chunk.len()) as u64 > self.cfg.max_object_bytes {
-                return Err(Error::TooLarge { limit: self.cfg.max_object_bytes });
+    /// Read `resp`'s body onto `buf`, each chunk within the idle timeout.
+    /// `Ok` once the body ends; a stall or a dropped connection is a
+    /// retriable [`Error::Unavailable`] with `buf` holding what arrived.
+    async fn read_into(
+        &self,
+        resp: &mut reqwest::Response,
+        buf: &mut bytes::BytesMut,
+    ) -> Result<()> {
+        let limit = self.cfg.max_object_bytes;
+        loop {
+            let chunk = match tokio::time::timeout(self.cfg.idle_timeout, resp.chunk()).await {
+                Err(_) => {
+                    return Err(Error::unavailable(
+                        "stalled: no data within the idle timeout",
+                        true,
+                    ))
+                }
+                Ok(Err(_)) => return Err(Error::unavailable("connection lost mid-body", true)),
+                Ok(Ok(None)) => return Ok(()),
+                Ok(Ok(Some(c))) => c,
+            };
+            if (buf.len() + chunk.len()) as u64 > limit {
+                return Err(Error::TooLarge { limit });
             }
             buf.extend_from_slice(&chunk);
         }
+    }
+
+    /// A buffer for a body of `len` bytes (when known and allowed).
+    fn buffer(&self, len: Option<u64>) -> Result<bytes::BytesMut> {
+        let limit = self.cfg.max_object_bytes;
+        match len {
+            Some(n) if n > limit => Err(Error::TooLarge { limit }),
+            Some(n) => Ok(bytes::BytesMut::with_capacity(usize::try_from(n).unwrap_or(0))),
+            None => Ok(bytes::BytesMut::new()),
+        }
+    }
+
+    async fn body(&self, resp: reqwest::Response) -> Result<Bytes> {
+        let mut buf = self.buffer(resp.content_length())?;
+        let mut resp = resp;
+        self.read_into(&mut resp, &mut buf).await?;
         Ok(buf.freeze())
     }
 
     async fn head_inner(&self, key: &str) -> Result<Option<Meta>> {
         let url = format!("{}?fields=name,size,generation", self.object_url(key));
-        let resp = self.send(|| self.http.get(&url)).await?;
+        let resp = self.send(self.small(), || self.http.get(&url)).await?;
         match resp.status().as_u16() {
             404 => Ok(None),
             200 => {
@@ -199,7 +345,7 @@ impl<T: TokenProvider> Gcs<T> {
 
     async fn stat_inner(&self, key: &str) -> Result<Option<Stat>> {
         let url = format!("{}?fields=name,size,generation,contentEncoding", self.object_url(key));
-        let resp = self.send(|| self.http.get(&url)).await?;
+        let resp = self.send(self.small(), || self.http.get(&url)).await?;
         match resp.status().as_u16() {
             404 => Ok(None),
             200 => {
@@ -212,22 +358,14 @@ impl<T: TokenProvider> Gcs<T> {
 
     async fn get_inner(&self, key: &str) -> Result<Option<Object>> {
         let url = format!("{}?alt=media", self.object_url(key));
-        let resp = self.send(|| stored_bytes(self.http.get(&url))).await?;
+        let resp = self.send(self.download(), || stored_bytes(self.http.get(&url))).await?;
         match resp.status().as_u16() {
             404 => Ok(None),
             200 => {
                 let header_gen = generation_header(&resp);
                 let served = served_encoding(&resp)?;
-                let sum = served.and_then(|_| stored_crc32c(&resp));
-                let mut bytes = self.body(resp).await?;
+                let mut bytes = self.read_object(&url, resp, header_gen, served.is_some()).await?;
                 if let Some(e) = served {
-                    // The checksum covers the stored bytes, which is what an
-                    // encoded body is served as: verify, then decode once.
-                    if sum.is_some_and(|want| crc32c::crc32c(&bytes) != want) {
-                        return Err(Error::corrupt(format!(
-                            "{key}: stored bytes fail their CRC-32C"
-                        )));
-                    }
                     bytes = encoding::decode(e, &bytes, self.max_inflated)?;
                 }
                 let generation = match header_gen {
@@ -236,6 +374,110 @@ impl<T: TokenProvider> Gcs<T> {
                     None => self.head_inner(key).await?.map_or(1, |m| m.generation),
                 };
                 Ok(Some(Object { bytes, generation }))
+            }
+            _ => Err(status_error(resp).await),
+        }
+    }
+
+    /// The whole body of a 200 media response, resuming when it breaks off,
+    /// verified against the stored CRC-32C (which covers the bytes as served
+    /// here: plain bytes, or an encoded body before it is decoded).
+    ///
+    /// A plain object of known length and generation resumes with
+    /// `Range: bytes=<received>-` pinned by `ifGenerationMatch`, so the parts
+    /// are always one generation. An encoded body cannot resume (a byte range
+    /// of a compressed stream is meaningless) and neither can a body of
+    /// unknown length or generation: those restart from byte 0. Either way
+    /// at most `max_retries` consecutive attempts may make no progress.
+    async fn read_object(
+        &self,
+        url: &str,
+        first: reqwest::Response,
+        generation: Option<u64>,
+        encoded: bool,
+    ) -> Result<Bytes> {
+        let total = first.content_length();
+        let ranged = !encoded && generation.is_some() && total.is_some();
+        let mut sum = stored_crc32c(&first);
+        let mut buf = self.buffer(total)?;
+        let mut resp = first;
+        // Progress is a body longer than any before it: a server that drops
+        // every attempt, or ignores `Range` and restarts, runs out of tries.
+        let mut best = 0;
+        let mut stalls = 0;
+        loop {
+            let failure = match self.read_into(&mut resp, &mut buf).await {
+                Ok(()) if total.is_none_or(|t| buf.len() as u64 == t) => break,
+                // Ended short of its Content-Length: a dropped body by
+                // another name.
+                Ok(()) => Error::unavailable("body ended early", true),
+                Err(e) if e.is_retriable() => e,
+                Err(e) => return Err(e),
+            };
+            stalls = if ranged && buf.len() > best { 0 } else { stalls + 1 };
+            best = best.max(buf.len());
+            if stalls > self.cfg.max_retries {
+                return Err(failure);
+            }
+            tokio::time::sleep(backoff(stalls.max(1))).await;
+            let from = if ranged { buf.len() as u64 } else { 0 };
+            resp = self.resume(url, generation, from, total).await?;
+            if resp.status().as_u16() == 200 {
+                // Whole again (a restart, or a server that ignored Range).
+                buf.clear();
+                sum = stored_crc32c(&resp);
+            }
+        }
+        if sum.is_some_and(|want| crc32c::crc32c(&buf) != want) {
+            return Err(Error::corrupt("stored bytes fail their CRC-32C"));
+        }
+        Ok(buf.freeze())
+    }
+
+    /// Ask again for an object read that broke off: from byte `from` (or
+    /// whole when `from == 0`), pinned to `generation` when known. Returns a
+    /// 200 or a 206 that continues exactly at `from`; a changed or deleted
+    /// object is [`Error::Changed`].
+    async fn resume(
+        &self,
+        url: &str,
+        generation: Option<u64>,
+        from: u64,
+        total: Option<u64>,
+    ) -> Result<reqwest::Response> {
+        let pinned = match generation {
+            Some(g) => format!("{url}&ifGenerationMatch={g}"),
+            None => url.to_owned(),
+        };
+        let range = format!("bytes={from}-");
+        let resp = self
+            .send(self.download(), || {
+                let rb = stored_bytes(self.http.get(&pinned));
+                if from == 0 {
+                    rb
+                } else {
+                    rb.header("range", &range)
+                }
+            })
+            .await?;
+        let status = resp.status().as_u16();
+        let same = generation.is_none_or(|g| generation_header(&resp).is_none_or(|h| h == g));
+        match status {
+            412 | 404 => Err(Error::Changed),
+            200 | 206 if !same => Err(Error::Changed),
+            200 => Ok(resp),
+            206 => {
+                let span = resp
+                    .headers()
+                    .get("content-range")
+                    .and_then(|v| v.to_str().ok())
+                    .and_then(ranges::content_range);
+                match span {
+                    Some((first, _, size)) if first == from && total.is_none_or(|t| t == size) => {
+                        Ok(resp)
+                    }
+                    _ => Err(Error::protocol("a resumed read answered with another range")),
+                }
             }
             _ => Err(status_error(resp).await),
         }
@@ -255,7 +497,9 @@ impl<T: TokenProvider> Gcs<T> {
         let header = format!("bytes={}-{}", range.start, range.end - 1);
         // `Accept-Encoding: gzip` keeps the server from decompressing an
         // encoded object (and ignoring the range) only to have it refused.
-        let resp = self.send(|| stored_bytes(self.http.get(&url).header("range", &header))).await?;
+        let resp = self
+            .send(self.download(), || stored_bytes(self.http.get(&url).header("range", &header)))
+            .await?;
         if matches!(resp.status().as_u16(), 200 | 206 | 416) {
             if let Some(token) = stored_encoding(&resp) {
                 return Err(Error::EncodedRange { encoding: token });
@@ -309,8 +553,9 @@ impl<T: TokenProvider> Gcs<T> {
             self.put_resumable(&query, &stored).await?
         } else {
             let url = format!("{}/o?uploadType=media&{query}", self.upload);
+            let bound = Bound::Whole(self.cfg.upload_bound(stored.len()));
             let resp = self
-                .send(|| {
+                .send(bound, || {
                     self.http
                         .post(&url)
                         .header("content-type", "application/octet-stream")
@@ -345,33 +590,134 @@ impl<T: TokenProvider> Gcs<T> {
         }
     }
 
+    /// A resumable upload: start a session (carrying the preconditions),
+    /// then send `body` in chunks. A session that expires mid-upload is
+    /// restarted once from byte 0. Returns the final status and response.
     async fn put_resumable(&self, query: &str, body: &Bytes) -> Result<(u16, reqwest::Response)> {
         let init = format!("{}/o?uploadType=resumable&{query}", self.upload);
-        let resp = self
-            .send(|| {
-                self.http
-                    .post(&init)
-                    .header("content-type", "application/json")
-                    .header("x-upload-content-type", "application/octet-stream")
-                    .header("x-upload-content-length", body.len().to_string())
-                    .body("{}")
-            })
-            .await?;
-        let status = resp.status().as_u16();
-        if status != 200 && status != 201 {
-            return Ok((status, resp));
+        let total = body.len().to_string();
+        let mut restarted = false;
+        loop {
+            let resp = self
+                .send(self.small(), || {
+                    self.http
+                        .post(&init)
+                        .header("content-type", "application/json")
+                        .header("x-upload-content-type", "application/octet-stream")
+                        .header("x-upload-content-length", &total)
+                        .body("{}")
+                })
+                .await?;
+            let status = resp.status().as_u16();
+            if status != 200 && status != 201 {
+                return Ok((status, resp));
+            }
+            let session = resp
+                .headers()
+                .get("location")
+                .and_then(|v| v.to_str().ok())
+                .ok_or_else(|| Error::protocol("resumable upload without a session URL"))?;
+            if !self.is_upload_url(session) {
+                return Err(Error::protocol("resumable session URL on an unexpected host"));
+            }
+            match self.upload_chunks(session, body).await? {
+                Session::Done(status, resp) => return Ok((status, resp)),
+                Session::Gone if !restarted => restarted = true,
+                Session::Gone => {
+                    return Err(Error::unavailable(
+                        "resumable upload session expired again after a restart",
+                        true,
+                    ))
+                }
+            }
         }
-        let session = resp
-            .headers()
-            .get("location")
-            .and_then(|v| v.to_str().ok())
-            .map(str::to_owned)
-            .ok_or_else(|| Error::protocol("resumable upload without a session URL"))?;
-        if !(session.starts_with(&self.upload) || session.starts_with("https://")) {
-            return Err(Error::protocol("resumable session URL on an unexpected host"));
+    }
+
+    /// A session URL must be on the upload endpoint's own origin: the chunks
+    /// carry our token and our bytes.
+    fn is_upload_url(&self, url: &str) -> bool {
+        // `upload` is `{scheme}://{authority}/upload/…`: the origin is
+        // everything before the first `/` after the scheme, and the URL must
+        // continue it with a `/` (not `.evil`, `@evil` or `:port`).
+        let after_scheme = self.upload.find("://").map_or(0, |i| i + 3);
+        let origin = self.upload[after_scheme..]
+            .find('/')
+            .map_or(self.upload.as_str(), |i| &self.upload[..after_scheme + i]);
+        url.strip_prefix(origin).is_some_and(|rest| rest.starts_with('/'))
+    }
+
+    /// Send `body` through `session` chunk by chunk.
+    ///
+    /// Each chunk is `PUT` with `Content-Range: bytes a-b/total`; a 308
+    /// reports the committed length in `Range`. After a transient failure
+    /// (timeout, lost connection, 408/429/5xx) the session is asked for its
+    /// committed length (`Content-Range: bytes */total`, empty body) and only
+    /// the remainder is sent again. At most `max_retries` consecutive
+    /// attempts may make no progress. The body is sliced, never copied.
+    async fn upload_chunks(&self, session: &str, body: &Bytes) -> Result<Session> {
+        let total = body.len() as u64;
+        // Highest committed length the server has confirmed: it never shrinks.
+        let mut acked = 0u64;
+        let mut stalls = 0u32;
+        let mut failed = false;
+        loop {
+            let resp = if failed {
+                // Where did it get to?
+                let rb = self
+                    .http
+                    .put(session)
+                    .header("content-range", format!("bytes */{total}"))
+                    .body(Bytes::new());
+                Self::dispatch(self.authed(rb).await?, self.small()).await
+            } else {
+                let end = acked.saturating_add(self.cfg.upload_chunk as u64).min(total);
+                let piece = body.slice(span(acked, end));
+                let range = if piece.is_empty() {
+                    format!("bytes */{total}")
+                } else {
+                    format!("bytes {acked}-{}/{total}", end - 1)
+                };
+                let bound = Bound::Whole(self.cfg.upload_bound(piece.len()));
+                let rb = self.http.put(session).header("content-range", range).body(piece);
+                Self::dispatch(self.authed(rb).await?, bound).await
+            };
+            let error = match resp {
+                Ok(r) => match r.status().as_u16() {
+                    308 => {
+                        let range = r.headers().get("range").map(|v| v.to_str().unwrap_or(""));
+                        let now = ranges::committed(range, total)
+                            .filter(|n| *n >= acked)
+                            .ok_or_else(|| {
+                                Error::protocol("resumable session reported an impossible offset")
+                            })?;
+                        // A chunk that moved nothing counts against the
+                        // budget like a failure, so a server that never
+                        // advances cannot hold the upload in a loop.
+                        let progressed = now > acked;
+                        acked = now;
+                        if progressed {
+                            stalls = 0;
+                        }
+                        if progressed || failed {
+                            failed = false;
+                            continue;
+                        }
+                        Error::unavailable("resumable session made no progress", true)
+                    }
+                    404 | 410 => return Ok(Session::Gone),
+                    s if is_retriable_status(s) => status_error(r).await,
+                    s => return Ok(Session::Done(s, r)),
+                },
+                Err(e) if e.is_retriable() => e,
+                Err(e) => return Err(e),
+            };
+            stalls += 1;
+            if stalls > self.cfg.max_retries {
+                return Err(error);
+            }
+            failed = true;
+            tokio::time::sleep(backoff(stalls)).await;
         }
-        let resp = self.send(|| self.http.put(&session).body(body.clone())).await?;
-        Ok((resp.status().as_u16(), resp))
     }
 
     async fn list_inner(&self, prefix: &str) -> Result<Vec<Meta>> {
@@ -408,7 +754,7 @@ impl<T: TokenProvider> Gcs<T> {
                 url.push_str("&pageToken=");
                 encode_component(p, &mut url);
             }
-            let resp = self.send(|| self.http.get(&url)).await?;
+            let resp = self.send(self.small(), || self.http.get(&url)).await?;
             if resp.status().as_u16() != 200 {
                 return Err(status_error(resp).await);
             }
@@ -430,7 +776,7 @@ impl<T: TokenProvider> Gcs<T> {
 
     async fn delete_inner(&self, key: &str) -> Result<()> {
         let url = self.object_url(key);
-        let resp = self.send(|| self.http.delete(&url)).await?;
+        let resp = self.send(self.small(), || self.http.delete(&url)).await?;
         match resp.status().as_u16() {
             200 | 204 | 404 => Ok(()),
             _ => Err(status_error(resp).await),
@@ -511,6 +857,11 @@ impl<T: TokenProvider> ObjectStore for Gcs<T> {
         check_prefix(prefix)?;
         self.list_stat_inner(prefix).await
     }
+}
+
+/// `a..b` of a body held in memory (both within it by construction).
+fn span(a: u64, b: u64) -> Range<usize> {
+    usize::try_from(a).unwrap_or(usize::MAX)..usize::try_from(b).unwrap_or(usize::MAX)
 }
 
 /// GCS bucket names: 3–222 characters of `[a-z0-9._-]`, starting and ending
@@ -594,6 +945,34 @@ mod tests {
         let req = stored_bytes(reqwest::Client::new().get("http://127.0.0.1/o")).build().unwrap();
         let asked = req.headers().get("accept-encoding").and_then(|v| v.to_str().ok());
         assert_eq!(asked, cfg!(feature = "gzip").then_some("gzip"));
+    }
+
+    #[test]
+    fn session_urls_stay_on_the_upload_origin() {
+        let g = Gcs::new("bkt", crate::token::Static::none(), GcsConfig::default()).unwrap();
+        let ok = "https://storage.googleapis.com/upload/storage/v1/b/bkt/o?uploadType=resumable&upload_id=x";
+        assert!(g.is_upload_url(ok));
+        for bad in [
+            "https://storage.googleapis.com.evil.example/upload/x",
+            "https://storage.googleapis.com@evil.example/upload/x",
+            "https://storage.googleapis.com:8443/upload/x",
+            "http://storage.googleapis.com/upload/x",
+            "https://evil.example/upload/storage/v1/b/bkt/o",
+            "https://storage.googleapis.com",
+            "",
+        ] {
+            assert!(!g.is_upload_url(bad), "{bad}");
+        }
+    }
+
+    #[test]
+    fn upload_bounds_grow_with_the_body() {
+        let c = GcsConfig::default();
+        assert_eq!(c.upload_bound(0), Duration::from_secs(30));
+        // 8 MiB at 64 KiB/s is 128 s on top of the 30 s.
+        assert_eq!(c.upload_bound(8 << 20), Duration::from_secs(158));
+        let floor = GcsConfig { min_throughput: 1, ..GcsConfig::default() };
+        assert!(floor.upload_bound(usize::MAX) > Duration::from_secs(1 << 40), "saturates");
     }
 
     #[test]

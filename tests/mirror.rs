@@ -419,3 +419,178 @@ fn a_memory_only_replica_refuses_tampered_objects() {
         block_on(mem.put(&victim, original, Cond::None)).unwrap();
     }
 }
+
+/// A base published in another format version (an older release's, say)
+/// pulls as graph-r's typed `Version`, naming both versions, never as
+/// `Corrupt`: the caller rebuilds instead of reporting damage.
+#[test]
+fn a_base_of_another_format_version_pulls_as_a_typed_version_error() {
+    use graph_r::format::base;
+    use graph_r::hash::xxh3_64;
+    let (_dir, store) = writer();
+    page(&store, 1);
+    let mem = Mem::default();
+    block_on(Mirror::new(&mem, "kb").unwrap().publish(&store)).unwrap();
+    // Rewrite the published base as the other version would have written
+    // it: the version field, the header checksum over it, and HEAD's sum of
+    // the base (with HEAD's own checksum).
+    let other = base::VERSION ^ 1;
+    let key = format!("kb/base/{:016x}.base", store.generation());
+    let mut b = block_on(mem.get(&key)).unwrap().unwrap().bytes.to_vec();
+    b[4..6].copy_from_slice(&other.to_le_bytes());
+    let sum = xxh3_64(&b[..120]);
+    b[120..128].copy_from_slice(&sum.to_le_bytes());
+    let mut head = block_on(mem.get("kb/HEAD")).unwrap().unwrap().bytes.to_vec();
+    head[24..32].copy_from_slice(&xxh3_64(&b).to_le_bytes());
+    let n = head.len() - 8;
+    let sum = xxh3_64(&head[..n]);
+    head[n..].copy_from_slice(&sum.to_le_bytes());
+    block_on(mem.put(&key, Bytes::from(b), Cond::None)).unwrap();
+    block_on(mem.put("kb/HEAD", Bytes::from(head), Cond::None)).unwrap();
+    let dst = tempfile::tempdir().unwrap();
+    let pulled = block_on(Mirror::new(&mem, "kb").unwrap().pull_into(dst.path()));
+    let image = block_on(Mirror::new(&mem, "kb").unwrap().load_image());
+    // graph-r's typed `Version { found, supported }` (its text keeps the
+    // prefix every release printed; graph-r before 0.4.2 had only the text).
+    let typed = format!("Version {{ found: {other}, supported: {} }}", base::VERSION);
+    let text = format!("format error: unsupported version {other}");
+    for (what, r) in [("pull_into", pulled.map(|_| ())), ("load_image", image.map(|_| ()))] {
+        match r {
+            Err(Error::Graph(e)) => {
+                assert!(e.to_string().starts_with(&text), "{what}: {e}");
+                let debug = format!("{e:?}");
+                assert!(debug == typed || debug.starts_with("Format"), "{what}: {debug}");
+            }
+            other => panic!("{what}: expected graph-r's refusal, got {other:?}"),
+        }
+    }
+    for f in ["graph.base", "graph.wal"] {
+        assert!(!dst.path().join(f).exists(), "{f} was laid down");
+    }
+}
+
+/// One commit of `n` documents: one append, one record where a transaction
+/// is one record.
+fn txn(store: &Store, tag: &str, n: u64) {
+    let mut w = store.writer().unwrap();
+    for i in 0..n {
+        let url = format!("https://m.dev/{tag}/{i}");
+        w.upsert_node(&DocRecord {
+            url: &url,
+            url_key: UrlKey::of(&url),
+            content_hash: 1,
+            fetched_at_ms: 1,
+            title: None,
+            snippet: None,
+            etag: None,
+            pinned: false,
+        })
+        .unwrap();
+    }
+    w.commit().unwrap();
+}
+
+fn pulled_urls(mem: &Mem) -> (Vec<u8>, Vec<String>) {
+    let dst = tempfile::tempdir().unwrap();
+    block_on(Mirror::new(mem, "kb").unwrap().pull_into(dst.path())).unwrap().unwrap();
+    let wal = std::fs::read(dst.path().join("graph.wal")).unwrap();
+    let mut urls = Vec::new();
+    Store::open_read_only(dst.path())
+        .unwrap()
+        .snapshot()
+        .for_each_live(|n| urls.push(n.url.to_owned()));
+    (wal, urls)
+}
+
+/// Publishing reads the log under its own handle while another handle (in
+/// practice another process) may be mid-append. Whatever it catches, only
+/// whole records ship: a strict prefix of another writer's append is left
+/// out. Where the log format makes a transaction one record (graph-r 0.6),
+/// the replica holds every transaction whole: all of its ops or none.
+#[test]
+fn publishing_mid_append_ships_whole_records_only() {
+    use graph_r::format::wal;
+    const OPS: u64 = 4;
+    let atomic = wal::VERSION >= 3;
+    let (dir, store) = writer();
+    for i in 0..3 {
+        page(&store, i);
+    }
+    let path = dir.path().join("graph.wal");
+    let before = std::fs::read(&path).unwrap();
+    // The bytes of a real append: the same transaction committed in a copy.
+    let scratch = tempfile::tempdir().unwrap();
+    for f in ["graph.base", "graph.wal"] {
+        std::fs::copy(dir.path().join(f), scratch.path().join(f)).unwrap();
+    }
+    {
+        let copy = Store::open(scratch.path()).unwrap();
+        txn(&copy, "t", OPS);
+    }
+    let appended =
+        std::fs::read(scratch.path().join("graph.wal")).unwrap()[before.len()..].to_vec();
+    let step = (appended.len() / 24).max(1);
+    for cut in (1..appended.len()).step_by(step).chain([appended.len() - 1]) {
+        let mut local = before.clone();
+        local.extend_from_slice(&appended[..cut]);
+        // Caught by a first publish (the whole log), and by a publish on top
+        // of an earlier one (only the bytes past it).
+        let (whole, tail) = (Mem::default(), Mem::default());
+        let m = Mirror::new(&tail, "kb").unwrap();
+        std::fs::write(&path, &before).unwrap();
+        block_on(m.publish(&store)).unwrap();
+        std::fs::write(&path, &local).unwrap();
+        block_on(m.publish(&store)).unwrap();
+        block_on(Mirror::new(&whole, "kb").unwrap().publish(&store)).unwrap();
+        for (how, mem) in [("whole", &whole), ("tail", &tail)] {
+            let (pulled, urls) = pulled_urls(mem);
+            assert_eq!(
+                wal::committed_len(&pulled),
+                pulled.len(),
+                "{how} cut {cut}: a partial record"
+            );
+            assert_eq!(pulled[..], local[..wal::committed_len(&local)], "{how} cut {cut}");
+            for i in 0..3 {
+                assert!(
+                    urls.contains(&format!("https://m.dev/{i}")),
+                    "{how} cut {cut}: page {i} lost"
+                );
+            }
+            if atomic {
+                assert_eq!(urls.len(), 3, "{how} cut {cut}: part of a transaction shipped");
+            }
+        }
+    }
+    std::fs::write(&path, &before).unwrap();
+    // And live: another handle commits transactions while this one
+    // publishes (graph-r before 0.5 holds the writer lock for a handle's
+    // life, so there a second writable handle cannot exist).
+    let other = match Store::open(dir.path()) {
+        Ok(other) => other,
+        Err(graph_r::Error::Locked) => return,
+        Err(e) => panic!("{e}"),
+    };
+    let mem = Mem::default();
+    let m = Mirror::new(&mem, "kb").unwrap();
+    let done = std::sync::atomic::AtomicBool::new(false);
+    std::thread::scope(|s| {
+        s.spawn(|| {
+            for t in 0..40 {
+                txn(&other, &format!("live{t}"), OPS);
+            }
+            done.store(true, std::sync::atomic::Ordering::Release);
+        });
+        let mut rounds = 0;
+        while !done.load(std::sync::atomic::Ordering::Acquire) || rounds == 0 {
+            block_on(m.publish(&store)).unwrap();
+            let (pulled, urls) = pulled_urls(&mem);
+            assert_eq!(wal::committed_len(&pulled), pulled.len(), "a partial record shipped");
+            if atomic {
+                assert_eq!((urls.len() - 3) % OPS as usize, 0, "part of a transaction shipped");
+            }
+            rounds += 1;
+        }
+    });
+    block_on(m.publish(&store)).unwrap();
+    assert_eq!(pulled_urls(&mem).1.len(), 3 + 40 * OPS as usize);
+}

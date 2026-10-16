@@ -1,5 +1,16 @@
 # objstore-r
 
+[![CI](https://github.com/lituus-io/objstore-r/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/lituus-io/objstore-r/actions/workflows/ci.yml)
+[![Security](https://github.com/lituus-io/objstore-r/actions/workflows/security.yml/badge.svg?branch=main)](https://github.com/lituus-io/objstore-r/actions/workflows/security.yml)
+[![Fuzz](https://github.com/lituus-io/objstore-r/actions/workflows/fuzz.yml/badge.svg?branch=main)](https://github.com/lituus-io/objstore-r/actions/workflows/fuzz.yml)
+[![Benchmark](https://github.com/lituus-io/objstore-r/actions/workflows/benchmark.yml/badge.svg?branch=main)](https://github.com/lituus-io/objstore-r/actions/workflows/benchmark.yml)
+[![Release](https://github.com/lituus-io/objstore-r/actions/workflows/release.yml/badge.svg)](https://github.com/lituus-io/objstore-r/releases/latest)
+[![crates.io](https://img.shields.io/crates/v/uu-objstore-r?label=crates.io)](https://crates.io/crates/uu-objstore-r)
+[![docs.rs](https://img.shields.io/docsrs/uu-objstore-r?label=docs.rs)](https://docs.rs/uu-objstore-r)
+[![PyPI](https://img.shields.io/pypi/v/uu-objstore-r?label=PyPI)](https://pypi.org/project/uu-objstore-r/)
+[![Python](https://img.shields.io/pypi/pyversions/uu-objstore-r)](https://pypi.org/project/uu-objstore-r/)
+[![License](https://img.shields.io/badge/license-AGPL--3.0--or--later-blue)](LICENSE)
+
 A small object-store abstraction shared by
 [graph-r](https://github.com/lituus-io/graph-r) and
 [link-r](https://github.com/lituus-io/link-r): one GAT trait, three backends, generation preconditions
@@ -28,6 +39,13 @@ assert!(s.put("HEAD", Bytes::from_static(b"v3"), Cond::IfGeneration(g1)).await.i
 # assert_ne!(g1, g2);
 # Ok::<(), objstore_r::Error>(()) }).unwrap();
 ```
+
+## Install
+
+| | |
+|---|---|
+| Rust | `cargo add uu-objstore-r` |
+| Python ≥3.12 (abi3 wheels: Linux x86_64/aarch64, macOS x86_64/arm64, Windows x86_64) | `pip install uu-objstore-r` → `import objstore_r` |
 
 ## The trait
 
@@ -69,13 +87,71 @@ percent-encoding for URLs. Anything else is `Error::InvalidKey` before any I/O.
   and `k/…`; such writes fail with `InvalidKey`.
 - **`Gcs<T: TokenProvider>`** (feature `gcs`) — the JSON API over
   reqwest/rustls with HTTP/2 connection reuse. `ifGenerationMatch` for
-  conditions; media GETs with `Range`; single-request uploads up to 8 MiB and
-  resumable uploads above; paginated listing. Retries 408/429/5xx and transport
+  conditions; media GETs with `Range`; single-request uploads below 8 MiB and
+  chunked resumable uploads at or above it; downloads that resume where a
+  dropped connection left them; paginated listing (see [Networks](#networks)).
+  Retries 408/429/5xx and transport
   errors with capped, jittered exponential backoff — never 404 or 412. A lost
   response on a conditional write (it landed, the reply did not) is resolved by
   reading back and comparing bytes, so a retried CAS never reports a spurious
   conflict. Responses are size-capped, redirects are refused, and plain `http`
   is accepted only for a loopback emulator endpoint.
+
+### Networks
+
+A large object over a slow or unreliable link is the normal case, not an
+edge case: a 200 MiB snapshot over a 20 Mbit/s uplink takes about 80 s, and
+corporate proxies and laptop Wi-Fi drop connections. So the GCS store (and
+the `http` transport) bound *stalls*, never sizes: no timeout covers a whole
+transfer, and every timeout measures time without progress.
+
+| Knob (`GcsConfig`) | Default | Bounds |
+|---|---|---|
+| `connect_timeout` | 10 s | TCP, TLS and any proxy `CONNECT` |
+| `request_timeout` | 30 s | a whole small request (metadata, listing page, delete, session start, session status query); the wait for a download's response headers; the fixed part of an upload request's bound |
+| `idle_timeout` | 60 s | the longest a download may receive no bytes |
+| `min_throughput` | 64 KiB/s | the slowest upload tolerated: an upload request of `n` bytes may take `request_timeout + n / min_throughput` (8 MiB: 158 s) |
+| `max_retries` | 5 | retries of a transient failure; for a resumable transfer, consecutive attempts that make no progress |
+| `resumable_threshold` | 8 MiB | bodies at or above it upload through a resumable session |
+| `upload_chunk` | 8 MiB | bytes per resumable `PUT`; a multiple of 256 KiB |
+| `max_object_bytes` | 4 GiB | the largest body read, across every resumed attempt |
+
+Why idle and not total: a total timeout fails every transfer larger than
+`timeout × link speed` whatever the network's health (v0.2.4's 60 s failed a
+100 MiB object at 1 MiB/s on every attempt), and retrying it restarts from
+byte 0 and fails the same way. An idle timeout fails a dead connection just
+as fast and never a slow, healthy one. Uploads cannot observe their own
+progress mid-request, so each upload request is bounded by a floor rate
+instead, which is why uploads go in chunks.
+
+**Uploads.** Below `resumable_threshold`: one request. At or above it: a
+resumable session (preconditions ride on the session start), then one `PUT`
+per `upload_chunk` with `Content-Range: bytes a-b/total`, slicing the body
+without copying it. A 308 reports the committed length. After a transient
+failure (timeout, dropped connection, 408/429/5xx) the store asks the session
+for its committed length (`Content-Range: bytes */total`) and sends only the
+remainder. A session that has expired (404/410) is restarted once from byte 0;
+a second expiry is `Error::Unavailable`. A session URL off the upload
+endpoint's origin, or a committed length past the total, backwards or
+malformed, is `Error::Protocol`, never a loop. Without failures an upload of
+`n` bytes is exactly one session start plus `ceil(n / upload_chunk)` `PUT`s;
+each failure adds one status query.
+
+**Downloads.** A whole-object read records the object's generation. If the
+body breaks off, the rest is requested with `Range: bytes=<received>-`
+pinned by `ifGenerationMatch`; an object replaced in between is
+`Error::Changed` (two generations are never spliced). The object's CRC-32C
+(`x-goog-hash`) is verified over the assembled bytes before they are
+returned. A body served with a `Content-Encoding` cannot resume by range (a
+byte range of a gzip stream means nothing): it restarts from byte 0, within
+the same `max_retries` budget. `get_range` stays one request, under the idle
+timeout.
+
+**Tokens and proxies.** Every request, each chunk included, takes its token
+from the provider, which renews it a minute before it expires, so a long
+upload never carries a stale one. `HTTPS_PROXY`, `HTTP_PROXY` and `NO_PROXY`
+from the environment apply (reqwest's default; the build reads no system
+proxy settings beyond the environment).
 
 ### Content encoding (feature `gzip`)
 
@@ -112,6 +188,10 @@ decode it once into the file graph-r maps, and need no setting.
 tokens, retries and size caps as the GCS backend, for Vertex AI, BigQuery or
 any Google REST API. `send` returns a bounded body; `open` streams chunks
 (server-sent events) and cancels the request when the stream is dropped.
+`HttpConfig::timeout` (60 s) and `stream_timeout` (300 s) bound the wait for
+the response headers of `send` and `open` (plus `body / min_throughput` for a
+large request body); the body itself, whole or streamed, is bounded by
+`idle_timeout` (60 s) between chunks, never by a total.
 
 ### Credentials (features `http` / `gcs`)
 
@@ -145,13 +225,16 @@ view = memoryview(store.get("state/HEAD"))           # zero-copy
 | Conformance | `objstore_r::testing::conformance` (feature `testing`) — one suite every backend must pass: `tests/conformance.rs` runs it on `Mem`, `LocalDir`, fake-gcs-server (both upload paths) and, opt-in, a live bucket |
 | Property | `tests/proptest_model.rs` — random operation sequences on each backend against a reference model |
 | Security | `tests/security.rs` — hostile keys, symlink escapes, nesting collisions, and a scripted HTTP server that redirects, over-sends, fails transiently, loses responses and refuses auth |
+| Transfers | `tests/transfer.rs` — a local double of the JSON API (`tests/support/gcs_mock.rs`) that throttles, drops and stalls connections, expires sessions, replaces objects mid-read and sends hostile range headers; request counts are asserted exactly |
+| Live transfers | `tests/transfer_live.rs` — 64 and 300 MiB round trips, 100 MiB each way through a 1 MiB/s CONNECT proxy (`tests/support/throttle_proxy.rs`, chained through `HTTPS_PROXY` when set), and a tunnel killed mid-transfer each way; runs only with `OBJSTORE_GCS_TEST_BUCKET` |
 | Fuzz | `fuzz/` — key grammar and GCS response parsing (`cargo fuzz run fuzz_key`) |
 | Benchmarks | `benches/objstore_bench.rs` (criterion) |
 | Supply chain | `cargo deny`, `cargo audit` |
 
 `scripts/ci-local.sh` runs the whole CI locally (it starts fake-gcs-server in
-Docker when available). The live test runs only when you export
-`OBJSTORE_LIVE_BUCKET` yourself; it writes under a unique prefix and removes it.
+Docker when available). The live tests run only when you export
+`OBJSTORE_LIVE_BUCKET` or `OBJSTORE_GCS_TEST_BUCKET` yourself; they write
+under a unique prefix and remove it.
 
 ## Licence
 

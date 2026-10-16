@@ -32,14 +32,25 @@ use std::time::Duration;
 const MAX_RETRY_AFTER: Duration = Duration::from_secs(30);
 
 /// Settings.
+///
+/// No timeout covers a whole response body: a large or slow body takes as
+/// long as it takes while bytes keep arriving, and fails once none arrive for
+/// [`idle_timeout`](Self::idle_timeout).
 #[derive(Debug, Clone)]
 pub struct HttpConfig {
-    /// Whole-request timeout for [`Transport::send`].
+    /// The wait for [`Transport::send`]'s response headers, request body
+    /// included (plus `body / min_throughput` for a large request body).
     pub timeout: Duration,
-    /// Whole-request timeout for [`Transport::open`] (long streams).
+    /// The wait for [`Transport::open`]'s response headers: a streaming API
+    /// may think for a while before its first byte.
     pub stream_timeout: Duration,
-    /// Connection-establishment timeout.
+    /// Connection establishment (TCP, TLS and any proxy `CONNECT`).
     pub connect_timeout: Duration,
+    /// The longest a response body may deliver no bytes, whole or streamed.
+    pub idle_timeout: Duration,
+    /// The slowest request-body upload rate tolerated, in bytes per second:
+    /// it extends the header wait by `body / min_throughput`. Must not be zero.
+    pub min_throughput: u64,
     /// Retries after the first attempt (per the request's [`Retry`] policy).
     pub max_retries: u32,
     /// Largest body accepted, whole or streamed.
@@ -52,6 +63,8 @@ impl Default for HttpConfig {
             timeout: Duration::from_secs(60),
             stream_timeout: Duration::from_secs(300),
             connect_timeout: Duration::from_secs(10),
+            idle_timeout: Duration::from_secs(60),
+            min_throughput: 64 << 10,
             max_retries: 4,
             max_response_bytes: 64 << 20,
         }
@@ -69,6 +82,16 @@ pub struct Client<T: TokenProvider> {
 impl<T: TokenProvider> Client<T> {
     /// A client authenticating with `tokens`.
     pub fn new(tokens: T, cfg: HttpConfig) -> Result<Self> {
+        if cfg.min_throughput == 0
+            || [cfg.timeout, cfg.stream_timeout, cfg.connect_timeout, cfg.idle_timeout]
+                .contains(&Duration::ZERO)
+        {
+            return Err(Error::protocol(
+                "invalid configuration: timeouts and min_throughput must be positive",
+            ));
+        }
+        // No client-wide timeout and no reqwest `read_timeout` (its timer is
+        // not reset by request-body progress): see `exchange` and `Chunks`.
         let http = reqwest::Client::builder()
             .connect_timeout(cfg.connect_timeout)
             .redirect(reqwest::redirect::Policy::none())
@@ -99,7 +122,7 @@ impl<T: TokenProvider> Client<T> {
         Ok(())
     }
 
-    async fn build(&self, req: &Request<'_>, timeout: Duration) -> Result<reqwest::RequestBuilder> {
+    async fn build(&self, req: &Request<'_>) -> Result<reqwest::RequestBuilder> {
         let method = match req.method {
             Method::Get => reqwest::Method::GET,
             Method::Post => reqwest::Method::POST,
@@ -107,7 +130,7 @@ impl<T: TokenProvider> Client<T> {
             Method::Delete => reqwest::Method::DELETE,
             Method::Patch => reqwest::Method::PATCH,
         };
-        let mut rb = self.http.request(method, req.url).timeout(timeout);
+        let mut rb = self.http.request(method, req.url);
         let t = self.tokens.token().await?;
         if !t.secret().is_empty() {
             rb = rb.bearer_auth(t.secret());
@@ -128,21 +151,32 @@ impl<T: TokenProvider> Client<T> {
         Ok(rb)
     }
 
-    /// Send with the request's retry policy; returns once headers arrive.
-    async fn exchange(&self, req: &Request<'_>, timeout: Duration) -> Result<reqwest::Response> {
+    /// Send with the request's retry policy; returns once headers arrive,
+    /// each attempt within `wait` plus the request body's time at
+    /// `min_throughput`.
+    async fn exchange(&self, req: &Request<'_>, wait: Duration) -> Result<reqwest::Response> {
         Self::check(req)?;
+        let ms = (req.body.len() as u128 * 1000) / u128::from(self.cfg.min_throughput);
+        let wait =
+            wait.saturating_add(Duration::from_millis(u64::try_from(ms).unwrap_or(u64::MAX)));
         let mut attempt = 0;
         loop {
-            let outcome = self.build(req, timeout).await?.send().await;
+            let rb = self.build(req).await?;
+            // The error, and whether the connection itself failed.
+            let outcome = match tokio::time::timeout(wait, rb.send()).await {
+                Ok(Ok(r)) => Ok(r),
+                Ok(Err(e)) => Err((transport_error(&e), e.is_connect())),
+                Err(_) => Err((Error::unavailable("timed out", true), false)),
+            };
             let retry = match (&outcome, req.retry) {
                 (_, Retry::Never) => false,
                 (Ok(r), Retry::Transient) => is_retriable_status(r.status().as_u16()),
                 (Ok(r), Retry::Throttled) => r.status().as_u16() == 429,
-                (Err(e), Retry::Transient) => e.is_timeout() || e.is_connect() || e.is_request(),
-                (Err(e), Retry::Throttled) => e.is_connect(),
+                (Err((e, _)), Retry::Transient) => e.is_retriable(),
+                (Err((_, connect)), Retry::Throttled) => *connect,
             };
             if !retry || attempt >= self.cfg.max_retries {
-                return outcome.map_err(|e| transport_error(&e));
+                return outcome.map_err(|(e, _)| e);
             }
             attempt += 1;
             let wait = outcome
@@ -159,7 +193,7 @@ impl<T: TokenProvider> Client<T> {
         if resp.content_length().is_some_and(|n| n > limit) {
             return Err(Error::TooLarge { limit });
         }
-        let mut body = Chunks { resp, left: limit, limit };
+        let mut body = Chunks { resp, left: limit, limit, idle: self.cfg.idle_timeout };
         // Most responses arrive in one chunk: return it without copying.
         let Some(first) = body.next().await? else { return Ok(Bytes::new()) };
         let Some(second) = body.next().await? else { return Ok(first) };
@@ -179,17 +213,22 @@ fn retry_after(resp: &reqwest::Response) -> Option<Duration> {
     Some(crate::net::retry_after(v, graph_r::fsio::now_ms())?.min(MAX_RETRY_AFTER))
 }
 
-/// A bounded chunked body. Dropping it aborts the transfer.
+/// A bounded chunked body: each chunk must arrive within the idle timeout.
+/// Dropping it aborts the transfer.
 #[derive(Debug)]
 pub struct Chunks {
     resp: reqwest::Response,
     left: u64,
     limit: u64,
+    idle: Duration,
 }
 
 impl Chunks {
     async fn next(&mut self) -> Result<Option<Bytes>> {
-        let chunk = self.resp.chunk().await.map_err(|e| transport_error(&e))?;
+        let chunk = tokio::time::timeout(self.idle, self.resp.chunk())
+            .await
+            .map_err(|_| Error::unavailable("stalled: no data within the idle timeout", true))?
+            .map_err(|e| transport_error(&e))?;
         if let Some(c) = &chunk {
             let n = c.len() as u64;
             if n > self.left {
@@ -242,7 +281,8 @@ impl<T: TokenProvider> Transport for Client<T> {
             if resp.content_length().is_some_and(|n| n > limit) {
                 return Err(Error::TooLarge { limit });
             }
-            Ok((resp.status().as_u16(), Chunks { resp, left: limit, limit }))
+            let idle = self.cfg.idle_timeout;
+            Ok((resp.status().as_u16(), Chunks { resp, left: limit, limit, idle }))
         }
     }
 }

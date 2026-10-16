@@ -284,7 +284,11 @@ impl<'o, O: ObjectStore> Mirror<'o, O> {
         let (base, segs) = futures_util::future::try_join(base, segs).await?;
         // The bytes were checked against the manifest's checksum; the store
         // validates them once when it opens them. Only the generation here.
-        let generation = base::generation_of(&base).map_err(|e| corrupt(format!("base: {e}")))?;
+        // graph-r's own refusal passes through typed: a base of another
+        // format version (published by an older or newer release) is
+        // `graph_r::Error::Version` naming both versions, so a caller can
+        // tell "rebuild" from "corrupt".
+        let generation = base::generation_of(&base)?;
         if generation != m.generation {
             return Err(corrupt("base generation differs from the manifest"));
         }

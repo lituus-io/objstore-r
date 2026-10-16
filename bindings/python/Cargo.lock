@@ -542,7 +542,7 @@ dependencies = [
 
 [[package]]
 name = "objstore-r-python"
-version = "0.2.4"
+version = "0.2.5"
 dependencies = [
  "futures-executor",
  "futures-util",
@@ -1205,7 +1205,7 @@ dependencies = [
 
 [[package]]
 name = "uu-objstore-r"
-version = "0.2.4"
+version = "0.3.0"
 dependencies = [
  "bytes",
  "flate2",

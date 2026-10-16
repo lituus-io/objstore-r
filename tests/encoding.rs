@@ -521,12 +521,16 @@ mod gcs_wire {
         let (_, r) =
             scripted(&script, |ep| async move { store(ep).get_range("k", 2..5).await }).await;
         assert_eq!(r.unwrap(), &b"234"[..]);
+        let hash = "x-goog-generation: 4\r\nx-goog-hash: crc32c=T+R6pw==\r\n";
+        let script = [resp("200 OK", hash, b"raw")];
+        let (_, r) = scripted(&script, |ep| async move { store(ep).get("k").await }).await;
+        assert_eq!(r.unwrap().unwrap().bytes, &b"raw"[..]);
+        // Since 0.2.5 a plain body is verified too: a whole read may be
+        // assembled from resumed parts, and the checksum is what proves them.
         let script =
             [resp("200 OK", "x-goog-generation: 4\r\nx-goog-hash: crc32c=AAAAAA==\r\n", b"raw")];
         let (_, r) = scripted(&script, |ep| async move { store(ep).get("k").await }).await;
-        // A plain body is returned as served; its hash is not this change's
-        // to enforce (the default path is byte-for-byte what it was).
-        assert_eq!(r.unwrap().unwrap().bytes, &b"raw"[..]);
+        assert!(matches!(r, Err(Error::Corrupt { .. })), "{r:?}");
     }
 
     #[tokio::test(flavor = "current_thread")]
