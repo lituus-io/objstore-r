@@ -1,5 +1,23 @@
 # Changelog
 
+## 0.2.5
+
+- Builds on uu-graph-r 0.4, 0.5 or 0.6 (`>=0.4.0, <0.7`). graph-r 0.6 logs
+  a transaction as one checksummed record, so a mirror's committed prefix
+  (`committed_len`, `committed_frames_len`) now ends on a transaction
+  boundary: a publish that catches another writer mid-append ships whole
+  transactions only, never part of one. Nothing in the mirror changed for
+  it; tested against 0.4.1, 0.5.1 and 0.6.
+- A published base of another format version pulls as graph-r's typed
+  refusal instead of the mirror's `Corrupt`: from graph-r 0.4.2 on,
+  `Error::Graph(graph_r::Error::Version { found, supported })`. A store
+  published by graph-r 0.4 or 0.5 (format 2) and pulled by a build on 0.6
+  (format 3) reports `Version { found: 2, supported: 3 }`: rebuild it with
+  this release rather than treat it as damage. The reverse (a 0.6
+  publication pulled by a build on 0.5) reports `{ found: 3, supported: 2 }`.
+- New test: publishing while another handle is mid-append ships whole
+  records only, cut at every point of a real append.
+
 ## 0.2.4
 
 - Fixed: on Windows, Application Default Credentials were looked for under

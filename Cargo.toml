@@ -3,7 +3,7 @@
 
 [package]
 name = "uu-objstore-r"
-version = "0.2.4"
+version = "0.2.5"
 edition = "2021"
 rust-version = "1.89" # std File::lock (the pinned nightly is newer)
 license = "AGPL-3.0-or-later"
@@ -50,7 +50,7 @@ features = ["gcs", "blocking", "testing", "mirror", "gzip"]
 
 [dependencies]
 # The shared core: atomic files, locks, the clock, xxh3 (no store, no mmap).
-graph-r = { package = "uu-graph-r", path = "../graph-r", version = ">=0.4.0, <0.6", default-features = false }
+graph-r = { package = "uu-graph-r", path = "../graph-r", version = ">=0.4.0, <0.7", default-features = false }
 # try_join_all: fetch a mirrored base and its log segments concurrently on the
 # caller's task (no spawn).
 futures-util = { version = "0.3", optional = true, default-features = false, features = ["alloc"] }

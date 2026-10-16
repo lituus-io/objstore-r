@@ -9,7 +9,7 @@ build-backend = "maturin"
 # Distribution `uu-objstore-r`, matching its siblings `uu-graph-r` and
 # `uu-link-r`; the module this wheel ships is `objstore_r`.
 name = "uu-objstore-r"
-version = "0.2.4"
+version = "0.2.5"
 description = "One object-store API over Google Cloud Storage, a local directory and memory: generation preconditions (compare-and-swap), ranged reads, zero-copy buffers."
 # abi3-py312 is the floor the Rust side builds against.
 requires-python = ">=3.12"
