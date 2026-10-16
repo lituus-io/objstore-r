@@ -1,5 +1,16 @@
 # objstore-r
 
+[![CI](https://github.com/lituus-io/objstore-r/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/lituus-io/objstore-r/actions/workflows/ci.yml)
+[![Security](https://github.com/lituus-io/objstore-r/actions/workflows/security.yml/badge.svg?branch=main)](https://github.com/lituus-io/objstore-r/actions/workflows/security.yml)
+[![Fuzz](https://github.com/lituus-io/objstore-r/actions/workflows/fuzz.yml/badge.svg?branch=main)](https://github.com/lituus-io/objstore-r/actions/workflows/fuzz.yml)
+[![Benchmark](https://github.com/lituus-io/objstore-r/actions/workflows/benchmark.yml/badge.svg?branch=main)](https://github.com/lituus-io/objstore-r/actions/workflows/benchmark.yml)
+[![Release](https://github.com/lituus-io/objstore-r/actions/workflows/release.yml/badge.svg)](https://github.com/lituus-io/objstore-r/releases/latest)
+[![crates.io](https://img.shields.io/crates/v/uu-objstore-r?label=crates.io)](https://crates.io/crates/uu-objstore-r)
+[![docs.rs](https://img.shields.io/docsrs/uu-objstore-r?label=docs.rs)](https://docs.rs/uu-objstore-r)
+[![PyPI](https://img.shields.io/pypi/v/uu-objstore-r?label=PyPI)](https://pypi.org/project/uu-objstore-r/)
+[![Python](https://img.shields.io/pypi/pyversions/uu-objstore-r)](https://pypi.org/project/uu-objstore-r/)
+[![License](https://img.shields.io/badge/license-AGPL--3.0--or--later-blue)](https://github.com/lituus-io/objstore-r/blob/main/LICENSE)
+
 `pip install uu-objstore-r` → `import objstore_r` (Python ≥ 3.12, one `abi3`
 wheel per platform).
 
