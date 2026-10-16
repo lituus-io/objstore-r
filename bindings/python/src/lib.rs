@@ -72,6 +72,12 @@ create_exception!(
     ObjstoreError,
     "An object is stored with a content encoding this build cannot decode."
 );
+create_exception!(
+    objstore_r,
+    ChangedError,
+    ObjstoreError,
+    "The object was replaced while a resumed read was in flight: read it again."
+);
 
 fn map_err(e: objstore::Error) -> PyErr {
     use objstore::Error as E;
@@ -87,6 +93,7 @@ fn map_err(e: objstore::Error) -> PyErr {
         E::Protocol { .. } => ProtocolError::new_err(msg),
         E::EncodedRange { .. } => EncodedRangeError::new_err(msg),
         E::UnsupportedEncoding { .. } => UnsupportedEncodingError::new_err(msg),
+        E::Changed => ChangedError::new_err(msg),
         _ => ObjstoreError::new_err(msg),
     }
 }
@@ -335,8 +342,17 @@ impl PyStore {
     /// the metadata server on Cloud Run / GCE / GKE); `token=` for a fixed
     /// bearer token; `anonymous=True` for an emulator. `endpoint` must be
     /// https except on loopback (e.g. fake-gcs-server).
+    ///
+    /// Transfers are bounded by stalls, not by size: `request_timeout`
+    /// (seconds) bounds a small request and the wait for a download's
+    /// headers, `idle_timeout` the longest a download may receive nothing,
+    /// and an upload request of `n` bytes may take
+    /// `request_timeout + n / min_throughput` (bytes per second). Uploads at
+    /// or above `resumable_threshold` go in `upload_chunk`-byte pieces (a
+    /// multiple of 256 KiB) and resume after a failure; downloads resume too.
+    /// `timeout` is the 0.2.4 name of `request_timeout`, still accepted.
     #[staticmethod]
-    #[pyo3(signature = (bucket, *, token=None, anonymous=false, endpoint=None, timeout=60.0, max_retries=5, max_object_bytes=4 << 30, resumable_threshold=8 << 20, max_inflated=MAX_INFLATED_BYTES))]
+    #[pyo3(signature = (bucket, *, token=None, anonymous=false, endpoint=None, connect_timeout=10.0, request_timeout=30.0, idle_timeout=60.0, min_throughput=64 << 10, max_retries=5, max_object_bytes=4 << 30, resumable_threshold=8 << 20, upload_chunk=8 << 20, max_inflated=MAX_INFLATED_BYTES, timeout=None))]
     #[allow(clippy::too_many_arguments)]
     fn gcs(
         py: Python<'_>,
@@ -344,17 +360,42 @@ impl PyStore {
         token: Option<String>,
         anonymous: bool,
         endpoint: Option<String>,
-        timeout: f64,
+        connect_timeout: f64,
+        request_timeout: f64,
+        idle_timeout: f64,
+        min_throughput: u64,
         max_retries: u32,
         max_object_bytes: u64,
         resumable_threshold: usize,
+        upload_chunk: usize,
         max_inflated: u64,
+        timeout: Option<f64>,
     ) -> PyResult<Self> {
         if token.is_some() && anonymous {
             return Err(PyValueError::new_err("pass at most one of token and anonymous"));
         }
-        if !(timeout.is_finite() && timeout > 0.0) {
-            return Err(PyValueError::new_err("timeout must be a positive number of seconds"));
+        let seconds = |name: &str, v: f64| {
+            if v.is_finite() && v > 0.0 && v < 1e9 {
+                Ok(Duration::from_secs_f64(v))
+            } else {
+                Err(PyValueError::new_err(format!("{name} must be a positive number of seconds")))
+            }
+        };
+        let request_timeout = match timeout {
+            Some(t) => seconds("timeout", t)?,
+            None => seconds("request_timeout", request_timeout)?,
+        };
+        let connect_timeout = seconds("connect_timeout", connect_timeout)?;
+        let idle_timeout = seconds("idle_timeout", idle_timeout)?;
+        if min_throughput == 0 {
+            return Err(PyValueError::new_err(
+                "min_throughput must be positive (bytes per second)",
+            ));
+        }
+        if upload_chunk == 0 || !upload_chunk.is_multiple_of(256 << 10) {
+            return Err(PyValueError::new_err(
+                "upload_chunk must be a positive multiple of 256 KiB",
+            ));
         }
         let rt = tokio::runtime::Builder::new_multi_thread()
             .worker_threads(2)
@@ -366,10 +407,14 @@ impl PyStore {
         if let Some(e) = endpoint {
             cfg.endpoint = e;
         }
-        cfg.timeout = Duration::from_secs_f64(timeout);
+        cfg.connect_timeout = connect_timeout;
+        cfg.request_timeout = request_timeout;
+        cfg.idle_timeout = idle_timeout;
+        cfg.min_throughput = min_throughput;
         cfg.max_retries = max_retries;
         cfg.max_object_bytes = max_object_bytes;
         cfg.resumable_threshold = resumable_threshold;
+        cfg.upload_chunk = upload_chunk;
         let desc = format!("Store.gcs({bucket:?})");
         let gcs = py
             .detach(|| {
@@ -525,6 +570,7 @@ fn objstore_r(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add("ProtocolError", py.get_type::<ProtocolError>())?;
     m.add("EncodedRangeError", py.get_type::<EncodedRangeError>())?;
     m.add("UnsupportedEncodingError", py.get_type::<UnsupportedEncodingError>())?;
+    m.add("ChangedError", py.get_type::<ChangedError>())?;
     m.add("MAX_INFLATED_BYTES", MAX_INFLATED_BYTES)?;
     Ok(())
 }

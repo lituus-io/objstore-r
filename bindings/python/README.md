@@ -41,8 +41,11 @@ except objstore_r.PreconditionFailedError:
 - **Safe keys.** `/`-separated segments of `[A-Za-z0-9._-]`, validated before
   any I/O: no traversal, no hidden files, portable to every OS
   (`InvalidKeyError` otherwise).
-- **Production GCS client.** Resumable uploads above 8 MiB, ranged
-  downloads, retries with jittered backoff on 408/429/5xx (never on
+- **Production GCS client.** Chunked resumable uploads at 8 MiB and above,
+  downloads that resume where a dropped connection left them (pinned to one
+  generation, CRC-32C verified), timeouts that bound stalls rather than
+  sizes (`request_timeout`, `idle_timeout`, `min_throughput`,
+  `connect_timeout`, `upload_chunk` on `Store.gcs`), ranged downloads, retries with jittered backoff on 408/429/5xx (never on
   conflicts), lost-response detection on conditional writes, response size
   limits, no redirects, TLS required except for a loopback emulator. Tokens
   are cached and never appear in errors or reprs.
@@ -60,7 +63,8 @@ object; `get`/`head` return `None` instead), `ConflictError`,
 `PreconditionFailedError`, `InvalidKeyError`, `UnavailableError`,
 `AuthError`, `TooLargeError`, `ProtocolError`, `EncodedRangeError` (ranged
 read of an encoded object), `UnsupportedEncodingError` (an object stored with
-an encoding this build cannot decode). An unknown `content_encoding=`
+an encoding this build cannot decode), `ChangedError` (the object was
+replaced while a dropped read was resuming; read it again). An unknown `content_encoding=`
 argument is a `ValueError` before any I/O.
 
 ## Testing your code
