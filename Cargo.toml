@@ -120,3 +120,7 @@ required-features = ["mirror"]
 [[test]]
 name = "encoding"
 required-features = ["gzip", "testing"]
+
+[[test]]
+name = "transfer_live"
+required-features = ["gcs", "testing"]
