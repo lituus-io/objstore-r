@@ -42,6 +42,13 @@ test = false
 doc = false
 bench = false
 
+[[bin]]
+name = "fuzz_policy"
+path = "fuzz_targets/fuzz_policy.rs"
+test = false
+doc = false
+bench = false
+
 # Detached from the parent workspace on purpose (mirrors graph-r and link-r).
 [workspace]
 members = ["."]

@@ -13,6 +13,11 @@
 //!
 //! Tokens are cached until a minute before they expire and are never printed:
 //! [`AccessToken`]'s `Debug` is redacted.
+//!
+//! A process that must act only as its caller passes the caller's token with
+//! [`Adc::from_access_token`], or discovers with [`MetadataPolicy::Forbid`],
+//! under which the metadata server is never contacted: no user credential
+//! means [`Error::NoCredentials`], not the instance's own identity.
 
 use crate::{Error, Result};
 use graph_r::fsio::now_ms;
@@ -20,8 +25,8 @@ use std::future::Future;
 use std::sync::Mutex;
 use std::time::Duration;
 
-const METADATA_TOKEN: &str =
-    "http://metadata.google.internal/computeMetadata/v1/instance/service-accounts/default/token";
+const METADATA_HOST: &str = "metadata.google.internal";
+const METADATA_TOKEN_PATH: &str = "/computeMetadata/v1/instance/service-accounts/default/token";
 const TOKEN_URI: &str = "https://oauth2.googleapis.com/token";
 /// Refresh this long before expiry.
 const SKEW_MS: u64 = 60_000;
@@ -157,9 +162,15 @@ pub struct Metadata {
 }
 
 impl Metadata {
-    /// The default service account of the instance.
+    /// The default service account of the instance, at
+    /// `metadata.google.internal` or the `host[:port]` in `GCE_METADATA_HOST`
+    /// (as Google's client libraries honour it).
     pub fn new() -> Result<Self> {
-        Self::with_url(METADATA_TOKEN)
+        let host = std::env::var("GCE_METADATA_HOST").ok().filter(|h| !h.is_empty());
+        Self::with_url(&format!(
+            "http://{}{METADATA_TOKEN_PATH}",
+            host.as_deref().unwrap_or(METADATA_HOST)
+        ))
     }
 
     /// Another token URL (tests).
@@ -295,6 +306,18 @@ fn form_encode(s: &str) -> String {
     out
 }
 
+/// Whether credential discovery may fall through to the metadata server.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum MetadataPolicy {
+    /// After user credentials, use the instance's own identity (Cloud Run,
+    /// GCE, GKE). The historical behaviour.
+    #[default]
+    Allow,
+    /// Never contact the metadata server: without user credentials,
+    /// discovery is [`Error::NoCredentials`].
+    Forbid,
+}
+
 /// Application Default Credentials (no private-key signing).
 #[derive(Debug)]
 pub enum Adc {
@@ -308,20 +331,70 @@ pub enum Adc {
 
 impl Adc {
     /// `GOOGLE_APPLICATION_CREDENTIALS` (user credentials), then gcloud's
-    /// well-known file, then the metadata server.
+    /// well-known file, then the metadata server
+    /// ([`discover_with`](Self::discover_with) under [`MetadataPolicy::Allow`]).
     pub fn discover() -> Result<Self> {
-        if let Some(path) = std::env::var_os("GOOGLE_APPLICATION_CREDENTIALS") {
-            let json = std::fs::read(path)
-                .map_err(|_| Error::Auth { message: "unreadable credentials file".into() })?;
-            return GcloudUser::from_json(&json).map(Adc::User);
-        }
-        if let Some(dir) = gcloud_config_dir(|name: &str| std::env::var_os(name), cfg!(windows)) {
-            if let Ok(json) = std::fs::read(dir.join("application_default_credentials.json")) {
-                return GcloudUser::from_json(&json).map(Adc::User);
-            }
-        }
-        Metadata::new().map(Adc::Metadata)
+        Self::discover_with(MetadataPolicy::Allow)
     }
+
+    /// Discovery as [`discover`](Self::discover), with the metadata server
+    /// allowed or forbidden.
+    pub fn discover_with(metadata: MetadataPolicy) -> Result<Self> {
+        Self::discover_from(
+            |name: &str| std::env::var_os(name),
+            |p: &std::path::Path| std::fs::read(p).ok(),
+            cfg!(windows),
+            metadata,
+        )
+    }
+
+    fn discover_from<F, R>(var: F, read: R, windows: bool, metadata: MetadataPolicy) -> Result<Self>
+    where
+        F: Fn(&str) -> Option<std::ffi::OsString>,
+        R: Fn(&std::path::Path) -> Option<Vec<u8>>,
+    {
+        match user_credentials(var, read, windows)? {
+            Some(user) => Ok(Adc::User(user)),
+            None => match metadata {
+                MetadataPolicy::Allow => Metadata::new().map(Adc::Metadata),
+                MetadataPolicy::Forbid => Err(Error::NoCredentials {
+                    reason: "no user credentials and the metadata server is forbidden",
+                }),
+            },
+        }
+    }
+
+    /// A caller-supplied access token, used as is and never refreshed
+    /// ([`Adc::Static`]). An empty or blank token is
+    /// [`Error::NoCredentials`]: it would send unauthenticated requests.
+    pub fn from_access_token(secret: impl Into<String>) -> Result<Self> {
+        let secret = secret.into();
+        if secret.trim().is_empty() {
+            return Err(Error::NoCredentials { reason: "empty access token" });
+        }
+        Ok(Adc::Static(Static::new(secret)))
+    }
+}
+
+/// User credentials: the file named by `GOOGLE_APPLICATION_CREDENTIALS`, else
+/// gcloud's well-known file; `None` when neither exists. `var` and `read`
+/// are the environment and the file system, passed in for tests.
+fn user_credentials<F, R>(var: F, read: R, windows: bool) -> Result<Option<GcloudUser>>
+where
+    F: Fn(&str) -> Option<std::ffi::OsString>,
+    R: Fn(&std::path::Path) -> Option<Vec<u8>>,
+{
+    if let Some(path) = var("GOOGLE_APPLICATION_CREDENTIALS") {
+        let json = read(std::path::Path::new(&path))
+            .ok_or_else(|| Error::Auth { message: "unreadable credentials file".into() })?;
+        return GcloudUser::from_json(&json).map(Some);
+    }
+    if let Some(dir) = gcloud_config_dir(&var, windows) {
+        if let Some(json) = read(&dir.join("application_default_credentials.json")) {
+            return GcloudUser::from_json(&json).map(Some);
+        }
+    }
+    Ok(None)
 }
 
 /// gcloud's configuration directory, where `gcloud auth
@@ -427,6 +500,67 @@ mod tests {
         assert!(!dbg.contains("cs") && !dbg.contains("rt"), "{dbg}");
         assert_eq!(u.quota_project(), Some("p"));
         assert!(GcloudUser::from_json(br#"{"type":"service_account"}"#).is_err());
+    }
+
+    #[test]
+    fn from_access_token_is_static_and_refuses_blank() {
+        let a = Adc::from_access_token("ya29.caller").unwrap();
+        assert!(matches!(&a, Adc::Static(_)));
+        let t = futures::executor::block_on(a.token()).unwrap();
+        assert_eq!((t.secret(), t.expires_at_ms), ("ya29.caller", u64::MAX));
+        assert_eq!(a.quota_project(), None);
+        for blank in ["", "  ", "\n"] {
+            assert!(matches!(
+                Adc::from_access_token(blank),
+                Err(Error::NoCredentials { reason: "empty access token" })
+            ));
+        }
+    }
+
+    #[test]
+    fn static_tokens_are_fixed_and_none_sends_nothing() {
+        let t = futures::executor::block_on(Static::new("abc").token()).unwrap();
+        assert_eq!(t.secret(), "abc");
+        assert!(futures::executor::block_on(Static::none().token()).unwrap().secret().is_empty());
+    }
+
+    #[test]
+    fn user_credentials_come_from_the_env_file_then_the_well_known_file() {
+        let user = br#"{"type":"authorized_user","client_id":"i","client_secret":"s","refresh_token":"r","quota_project_id":"q"}"#;
+        let files = |want: &'static str| {
+            move |p: &std::path::Path| (p == std::path::Path::new(want)).then(|| user.to_vec())
+        };
+        let e = [("GOOGLE_APPLICATION_CREDENTIALS", "/k.json")];
+        let u = user_credentials(env(&e), files("/k.json"), false).unwrap().unwrap();
+        assert_eq!(u.quota_project(), Some("q"));
+        assert!(user_credentials(env(&e), |_: &std::path::Path| None, false).is_err());
+        let wk = "/h/.config/gcloud/application_default_credentials.json";
+        assert!(user_credentials(env(&[("HOME", "/h")]), files(wk), false).unwrap().is_some());
+        assert!(user_credentials(env(&[("HOME", "/h")]), files("/x"), false).unwrap().is_none());
+    }
+
+    #[test]
+    fn forbid_never_builds_the_metadata_provider() {
+        let none = |_: &std::path::Path| None;
+        let e = [("HOME", "/nowhere")];
+        assert!(matches!(
+            Adc::discover_from(env(&e), none, false, MetadataPolicy::Forbid),
+            Err(Error::NoCredentials { .. })
+        ));
+        // The same environment under Allow falls through, as it always has.
+        assert!(matches!(
+            Adc::discover_from(env(&e), none, false, MetadataPolicy::Allow),
+            Ok(Adc::Metadata(_))
+        ));
+        assert_eq!(MetadataPolicy::default(), MetadataPolicy::Allow, "compatible default");
+        // User credentials win under either policy.
+        let user = br#"{"type":"authorized_user","client_id":"i","client_secret":"s","refresh_token":"r"}"#;
+        let e = [("GOOGLE_APPLICATION_CREDENTIALS", "/k.json")];
+        let read = |_: &std::path::Path| Some(user.to_vec());
+        assert!(matches!(
+            Adc::discover_from(env(&e), read, false, MetadataPolicy::Forbid),
+            Ok(Adc::User(_))
+        ));
     }
 
     #[test]
