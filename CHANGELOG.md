@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.4.1
+
+- No API or behaviour change from 0.4.0. 0.4.0 reached PyPI but not crates.io:
+  CI and the release built against the graph-r sibling pinned at v0.4.1 while
+  the lockfile records graph-r 0.6.0, so the release checkout rewrote
+  `Cargo.lock` and `cargo publish` refused the dirty tree. The sibling pin is
+  now graph-r v0.6.0, so CI tests the graph-r the lockfile names, and CI fails
+  when the lockfile does not match the pinned siblings.
+
 ## 0.4.0
 
 - **Breaking:** `http::Client<T>` is now `Client<T, P: RequestPolicy =

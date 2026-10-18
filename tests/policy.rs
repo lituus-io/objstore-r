@@ -324,3 +324,13 @@ fn a_policy_check_costs_under_a_microsecond() {
     }
     assert!(best < std::time::Duration::from_micros(1), "{best:?} per check");
 }
+
+/// A crash the CI fuzz run found: a `file:` URL with control bytes, joined
+/// against a `Location`, tripped a debug assertion inside `url` itself. The
+/// client only ever sends https, so the harness models redirects from https
+/// requests only; this input must pass through without a panic.
+#[test]
+fn a_redirect_from_a_non_https_url_is_not_resolved() {
+    let input = b"file:\x1df\x1dKq:/H:/%:/B:\n\x00..//J\t\r\r:A\x00+";
+    objstore_r::policy::fuzz(input);
+}

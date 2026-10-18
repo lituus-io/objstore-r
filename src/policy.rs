@@ -474,7 +474,12 @@ pub fn fuzz(input: &[u8]) {
     };
     verify(&url);
     // A redirect is never followed; even if a caller did, the target must
-    // face the same check.
+    // face the same check. Only an https request can receive one: the client
+    // sends nothing else, and resolving against other schemes (`file:` with
+    // control bytes) trips a debug assertion inside `url` itself.
+    if url.scheme() != "https" {
+        return;
+    }
     if let Ok(next) = url.join(location) {
         verify(&next);
     }

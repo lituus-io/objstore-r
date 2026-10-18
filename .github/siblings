@@ -3,4 +3,4 @@
 #
 # Sibling repositories this one builds against, cloned beside the checkout
 # at these exact refs (scripts/fetch-siblings.sh). Bumped with each release.
-graph-r v0.4.1
+graph-r v0.6.0
