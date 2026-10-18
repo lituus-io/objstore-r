@@ -32,6 +32,10 @@ jobs:
           SIBLING_TOKEN: ${{ secrets.SIBLING_REPO_TOKEN || github.token }}
         run: scripts/fetch-siblings.sh
       - run: rustup show
+      # The release checkout resolves against these same sibling pins and
+      # refuses to publish a lockfile it had to rewrite; fail here instead.
+      - name: Cargo.lock matches the pinned siblings
+        run: cargo metadata --locked --format-version 1 > /dev/null
       - run: cargo fmt --check
 
   clippy:

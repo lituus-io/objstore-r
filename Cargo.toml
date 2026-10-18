@@ -3,7 +3,7 @@
 
 [package]
 name = "uu-objstore-r"
-version = "0.4.0"
+version = "0.4.1"
 edition = "2021"
 rust-version = "1.89" # std File::lock (the pinned nightly is newer)
 license = "AGPL-3.0-or-later"
