@@ -60,7 +60,7 @@ if grep -rnE --include='*.rs' '\bdyn\b|\bArc<|Box<dyn' src/ tests/ benches/ | gr
 
 step "fuzz (${FUZZ_SECS}s per target)"
 if have fuzz; then
-  for t in fuzz_key fuzz_gcs_wire fuzz_encoding; do (cd fuzz && cargo fuzz run "$t" -- -max_total_time="$FUZZ_SECS" 2>&1 | tail -1); done
+  for t in fuzz_key fuzz_gcs_wire fuzz_encoding fuzz_policy; do (cd fuzz && cargo fuzz run "$t" -- -max_total_time="$FUZZ_SECS" 2>&1 | tail -1); done
 else warn "cargo-fuzz not installed"; fi
 
 step "all gates passed"

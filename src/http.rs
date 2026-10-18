@@ -10,6 +10,12 @@
 //! One client holds one connection pool; with HTTP/2 many concurrent calls
 //! share a connection.
 //!
+//! Every request first passes the client's [`RequestPolicy`] (default
+//! [`Permissive`]): [`RequestPolicy::check`] on the method and parsed URL,
+//! then, for a `BigQuery` query job, [`RequestPolicy::check_query`] on its
+//! SQL text, which the client isolates itself (see [`crate::policy`]). A
+//! refusal is [`Error::Policy`], before a token is fetched or a byte sent.
+//!
 //! ```no_run
 //! # async fn demo() -> objstore_r::Result<()> {
 //! use objstore_r::transport::{Request, Transport};
@@ -22,6 +28,7 @@
 //! ```
 
 use crate::net::{backoff, is_allowed_endpoint, is_retriable_status, transport_error};
+use crate::policy::{query_sql, Permissive, RequestPolicy, Url};
 use crate::token::TokenProvider;
 use crate::transport::{BodyStream, Method, Request, Response, Retry, Transport};
 use crate::{Bytes, Error, Result};
@@ -71,17 +78,26 @@ impl Default for HttpConfig {
     }
 }
 
-/// An authorised HTTPS client. See the module docs.
+/// An authorised HTTPS client under request policy `P`. See the module docs.
 #[derive(Debug)]
-pub struct Client<T: TokenProvider> {
+pub struct Client<T: TokenProvider, P: RequestPolicy = Permissive> {
     http: reqwest::Client,
     tokens: T,
+    policy: P,
     cfg: HttpConfig,
 }
 
 impl<T: TokenProvider> Client<T> {
-    /// A client authenticating with `tokens`.
+    /// A client authenticating with `tokens`, under [`Permissive`].
     pub fn new(tokens: T, cfg: HttpConfig) -> Result<Self> {
+        Client::with_policy(tokens, Permissive, cfg)
+    }
+}
+
+impl<T: TokenProvider, P: RequestPolicy> Client<T, P> {
+    /// A client authenticating with `tokens` that sends only what `policy`
+    /// allows.
+    pub fn with_policy(tokens: T, policy: P, cfg: HttpConfig) -> Result<Self> {
         if cfg.min_throughput == 0
             || [cfg.timeout, cfg.stream_timeout, cfg.connect_timeout, cfg.idle_timeout]
                 .contains(&Duration::ZERO)
@@ -99,7 +115,12 @@ impl<T: TokenProvider> Client<T> {
             .user_agent(concat!("objstore-r/", env!("CARGO_PKG_VERSION")))
             .build()
             .map_err(|e| Error::unavailable(format!("http client: {e}"), false))?;
-        Ok(Self { http, tokens, cfg })
+        Ok(Self { http, tokens, policy, cfg })
+    }
+
+    /// The request policy.
+    pub fn policy(&self) -> &P {
+        &self.policy
     }
 
     /// The token provider.
@@ -112,17 +133,31 @@ impl<T: TokenProvider> Client<T> {
         &self.cfg
     }
 
-    fn check(req: &Request<'_>) -> Result<()> {
+    /// The transport's own rules, then the policy's; returns the URL as it
+    /// will be sent.
+    fn check(&self, req: &Request<'_>) -> Result<Url> {
         if !is_allowed_endpoint(req.url) {
             return Err(Error::protocol("the URL must be https:// (http:// only to loopback)"));
         }
-        if req.headers.iter().any(|(k, _)| k.eq_ignore_ascii_case("authorization")) {
-            return Err(Error::protocol("authorization is set by the transport"));
+        for (k, _) in req.headers {
+            if k.eq_ignore_ascii_case("authorization") {
+                return Err(Error::protocol("authorization is set by the transport"));
+            }
+            // A method override would make the checked method a fiction.
+            let k = k.to_ascii_lowercase();
+            if k.contains("method-override") || k == "x-http-method" {
+                return Err(Error::protocol("method overrides are not sent"));
+            }
         }
-        Ok(())
+        let url = Url::parse(req.url).map_err(|_| Error::protocol("unparseable URL"))?;
+        self.policy.check(req.method, &url)?;
+        if let Some(sql) = query_sql(req.method, &url, &req.body)? {
+            self.policy.check_query(&sql)?;
+        }
+        Ok(url)
     }
 
-    async fn build(&self, req: &Request<'_>) -> Result<reqwest::RequestBuilder> {
+    async fn build(&self, req: &Request<'_>, url: &Url) -> Result<reqwest::RequestBuilder> {
         let method = match req.method {
             Method::Get => reqwest::Method::GET,
             Method::Post => reqwest::Method::POST,
@@ -130,7 +165,7 @@ impl<T: TokenProvider> Client<T> {
             Method::Delete => reqwest::Method::DELETE,
             Method::Patch => reqwest::Method::PATCH,
         };
-        let mut rb = self.http.request(method, req.url);
+        let mut rb = self.http.request(method, url.clone());
         let t = self.tokens.token().await?;
         if !t.secret().is_empty() {
             rb = rb.bearer_auth(t.secret());
@@ -155,13 +190,13 @@ impl<T: TokenProvider> Client<T> {
     /// each attempt within `wait` plus the request body's time at
     /// `min_throughput`.
     async fn exchange(&self, req: &Request<'_>, wait: Duration) -> Result<reqwest::Response> {
-        Self::check(req)?;
+        let url = self.check(req)?;
         let ms = (req.body.len() as u128 * 1000) / u128::from(self.cfg.min_throughput);
         let wait =
             wait.saturating_add(Duration::from_millis(u64::try_from(ms).unwrap_or(u64::MAX)));
         let mut attempt = 0;
         loop {
-            let rb = self.build(req).await?;
+            let rb = self.build(req, &url).await?;
             // The error, and whether the connection itself failed.
             let outcome = match tokio::time::timeout(wait, rb.send()).await {
                 Ok(Ok(r)) => Ok(r),
@@ -251,7 +286,7 @@ impl BodyStream for Chunks {
     }
 }
 
-impl<T: TokenProvider> Transport for Client<T> {
+impl<T: TokenProvider, P: RequestPolicy> Transport for Client<T, P> {
     type Send<'a>
         = impl Future<Output = Result<Response>> + 'a
     where

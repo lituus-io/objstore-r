@@ -93,6 +93,46 @@ pub enum Error {
     /// generations are never spliced); read it again.
     #[error("object replaced during a resumed read")]
     Changed,
+    /// A request refused by the transport's request policy before any byte
+    /// was sent (see `http::Client::with_policy`).
+    #[error("refused by policy: {0}")]
+    Policy(#[from] PolicyError),
+    /// Credential discovery found no credential it is allowed to use (for
+    /// example under `token::MetadataPolicy::Forbid` with no user
+    /// credentials), or an empty token was supplied. Nothing was contacted.
+    #[error("no credentials: {reason}")]
+    NoCredentials {
+        /// Why.
+        reason: &'static str,
+    },
+}
+
+/// Why a request policy refused a request. Never carries the URL's query
+/// string, a body or a token.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+#[non_exhaustive]
+pub enum PolicyError {
+    /// The method, scheme, host, port or path is not one the policy allows.
+    #[error("endpoint not allowed: {reason}")]
+    Endpoint {
+        /// Which rule refused it.
+        reason: &'static str,
+    },
+    /// The SQL text of a `BigQuery` query job was refused.
+    #[error("query not allowed: {reason}")]
+    Query {
+        /// Why (the policy's own wording).
+        reason: std::borrow::Cow<'static, str>,
+    },
+    /// A request to a `BigQuery` query endpoint whose SQL could not be
+    /// isolated for checking (unreadable body, non-query or legacy-SQL job,
+    /// or a field that changes what the SQL reads). Refused under every
+    /// policy, so no query reaches `BigQuery` unchecked.
+    #[error("query body not checkable: {reason}")]
+    UncheckableQuery {
+        /// What was wrong.
+        reason: &'static str,
+    },
 }
 
 impl Error {

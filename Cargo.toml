@@ -3,7 +3,7 @@
 
 [package]
 name = "uu-objstore-r"
-version = "0.3.0"
+version = "0.4.0"
 edition = "2021"
 rust-version = "1.89" # std File::lock (the pinned nightly is newer)
 license = "AGPL-3.0-or-later"
@@ -84,6 +84,19 @@ required-features = ["gzip", "mirror"]
 [[test]]
 name = "conformance"
 required-features = ["testing"]
+
+[[test]]
+name = "policy"
+required-features = ["http", "testing"]
+
+[[test]]
+name = "metadata_forbid"
+required-features = ["http"]
+
+[[bench]]
+name = "policy_bench"
+harness = false
+required-features = ["http"]
 
 [profile.release]
 opt-level = 3

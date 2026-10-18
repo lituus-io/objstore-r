@@ -1685,7 +1685,7 @@ checksum = "b6c140620e7ffbb22c2dee59cafe6084a59b5ffc27a8859a5f0d494b5d52b6be"
 
 [[package]]
 name = "uu-graph-r"
-version = "0.4.1"
+version = "0.6.0"
 dependencies = [
  "bytes",
  "compact_str",
@@ -1696,7 +1696,7 @@ dependencies = [
 
 [[package]]
 name = "uu-objstore-r"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "bytes",
  "criterion",

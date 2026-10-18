@@ -93,6 +93,8 @@ pub mod gcs;
 #[cfg(feature = "http")]
 pub mod http;
 #[cfg(feature = "http")]
+pub mod policy;
+#[cfg(feature = "http")]
 pub mod token;
 
 #[cfg(feature = "testing")]
@@ -103,7 +105,7 @@ use std::ops::Range;
 
 pub use bytes::Bytes;
 pub use encoding::{ContentEncoding, MAX_INFLATED_BYTES};
-pub use error::{Error, Result};
+pub use error::{Error, PolicyError, Result};
 pub use key::Key;
 pub use local::LocalDir;
 pub use mem::{Fault, Mem};

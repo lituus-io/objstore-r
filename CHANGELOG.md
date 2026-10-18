@@ -1,5 +1,53 @@
 # Changelog
 
+## 0.4.0
+
+- **Breaking:** `http::Client<T>` is now `Client<T, P: RequestPolicy =
+  Permissive>`. Code that names `Client<T>` or calls `Client::new` compiles
+  unchanged and behaves as before, except for the query-body rule below.
+  `Error` gains `Policy(PolicyError)` and `NoCredentials`; `PolicyError` is
+  new.
+- New `policy` module. A `RequestPolicy` sees every request before a token is
+  fetched or a byte sent: `check(method, &Url)` on the URL exactly as it will
+  be sent, and `check_query(sql)` on the SQL of every BigQuery query job. The
+  default `check_query` refuses every query; this crate parses no SQL, so a
+  policy that admits queries says which. `Client::with_policy(tokens,
+  policy, cfg)` builds a client under a policy; `&P` is a policy whenever `P`
+  is.
+- `AllowList`: listed method + host + path-template rules (`{name}`
+  placeholders match one segment; `{name}:verb` matches a Google custom
+  method), over https on the default port, with no
+  user-info or fragment. Paths must be normalised: no empty segment or
+  trailing slash, no `.`/`..` in any spelling, no encoded `/`, `\`, NUL or
+  control bytes; literals match only their exact raw spelling. Redirects stay
+  disabled, so a listed endpoint cannot hand a request on.
+  `with_loopback_http` (feature `testing`) lets a loopback stub stand in.
+- The BigQuery query hook runs under every policy, on `send` and `open`: a
+  POST (or any request with a body) to a `jobs.query` (`.../queries`) or
+  `jobs.insert` (`.../jobs`, including `/upload/`) endpoint on any host must
+  carry exactly one GoogleSQL query, `useLegacySql: false`, with no
+  duplicate or aliased keys, no `tableDefinitions` or UDF resources, and no
+  load, copy or extract configuration; anything else is
+  `PolicyError::UncheckableQuery`, never sent. BigQuery batch requests are
+  refused likewise. **This applies under `Permissive` too**: non-query jobs
+  and legacy-SQL queries can no longer be sent through `http::Client`.
+- Requests carrying a method-override header (`X-HTTP-Method-Override`,
+  `X-HTTP-Method`) are refused: the checked method must be the method run.
+- `token::MetadataPolicy` (`Allow`, the default, or `Forbid`) and
+  `Adc::discover_with(policy)`. Under `Forbid` the metadata server is never
+  contacted: without user credentials discovery is `Error::NoCredentials`.
+  `Adc::discover()` is unchanged (`Allow`).
+- `Adc::from_access_token(secret)`: a caller-supplied token as
+  `Adc::Static`; an empty or blank token is `Error::NoCredentials`.
+- `token::Metadata::new` honours `GCE_METADATA_HOST` (`host[:port]`), as
+  Google's client libraries do.
+- New tests: the policy matrix, the query hook and `Forbid` (unit); a stub
+  server where only allow-listed requests and accepted queries arrive and a
+  decoy metadata server hears nothing under `Forbid` (integration); a
+  property test that no method x host x path outside the list passes
+  (security); fuzz target `fuzz_policy` (URLs and redirect targets); bench
+  `policy_bench` and a release-mode budget test (a check costs under 1 us).
+
 ## 0.3.0
 
 - **Breaking, for Rust code that builds `GcsConfig` or `HttpConfig` with a
