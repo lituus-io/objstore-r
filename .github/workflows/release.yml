@@ -65,7 +65,14 @@ jobs:
       # under target/ where the ../graph-r path dependency does not resolve.
       - name: Semver check
         run: |
-          prev=$(git tag --sort=-v:refname | grep -v "^${GITHUB_REF_NAME}$" | head -1 || true)
+          # The newest earlier tag whose version is on crates.io: a tag can
+          # exist without a published crate (0.4.0 reached PyPI only).
+          prev=""
+          for t in $(git tag --sort=-v:refname | grep -v "^${GITHUB_REF_NAME}$"); do
+            if curl -sf -A "lituus-io-release" "https://crates.io/api/v1/crates/uu-objstore-r/${t#v}" >/dev/null; then
+              prev="$t"; break
+            fi
+          done
           if [ -z "$prev" ]; then
             echo "first release: no baseline"
           elif ! git show "$prev:Cargo.toml" | grep -q '^name = "uu-objstore-r"'; then
