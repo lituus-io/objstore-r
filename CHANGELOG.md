@@ -1,5 +1,18 @@
 # Changelog
 
+## 0.4.2
+
+- Security: every lockfile (crate, Python binding, fuzz) refreshed to
+  rustls-webpki 0.103.16 and webpki-roots 1.0.11 (RUSTSEC-2026-0382, -0381):
+  certificate paths through the distrusted emSign intermediates, whose
+  private keys are public, are rejected. This is the TLS stack the `gcs` and
+  `http` clients use. The PyPI wheels are built from these lockfiles.
+- Builds against uu-graph-r 0.6.1 (the sibling pin moves from v0.6.0).
+- The Security workflow fails only on vulnerabilities. Unmaintained and
+  unsound advisories and yanked crates are reported as warnings on the run
+  instead of failing it.
+- No API or behaviour change.
+
 ## 0.4.1
 
 - No API or behaviour change from 0.4.0. 0.4.0 reached PyPI but not crates.io:
